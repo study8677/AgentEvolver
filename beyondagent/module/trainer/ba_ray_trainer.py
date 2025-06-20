@@ -322,7 +322,7 @@ class BeyondAgentRayPPOTrainer(RayPPOTrainer):
                             # TODO enable tracing by jinli 0619
                             print("=" * 10 + "start fit rollout" + "=" * 10)
                             trajectories = self.env_manager.rollout(tasks, mode="sample")
-                            print("=" * 10 + "start fit rollout" + "=" * 10)
+                            print("=" * 10 + "end fit rollout" + "=" * 10)
 
                             gen_batch_output = self.env_manager.to_dataproto(trajectories)
                             print(f"gen_batch_output.info batch.keys={gen_batch_output.batch.keys()}")

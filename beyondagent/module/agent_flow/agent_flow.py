@@ -21,12 +21,14 @@ class AgentFlow(BaseAgentFlow):
                 trajectory=trajectory,
                 retrieve_top_k=self.config.experience_maker.retrieve_top_k,
                 workspace_id=self.config.experience_maker.workspace_id)
-            logger.info(f"history_experience={history_experience}")
+
 
             if history_experience:
+                logger.info(f"history_experience={history_experience}")
                 new_content = history_experience + "\n\n" + trajectory.steps[-1]["content"]
                 trajectory.steps[-1]["content"] = new_content
-                logger.info(f"new_content={new_content}")
+            else:
+                logger.info(f"history_experience is empty!")
 
         for act_step in range(self.max_steps):
             # if use qwen3, add /no_think
@@ -44,7 +46,7 @@ class AgentFlow(BaseAgentFlow):
 
             # callback llm server, messages.size=1
             llm_output = self.llm_chat_fn(trajectory.steps, custom_sampling_params={"max_completion_tokens": self.max_model_len-current_token_len})
-            assert len(llm_output) == 1
+            assert len(llm_output) == 1, llm_output
             trajectory.steps.extend(llm_output)
 
             env_output = env.step(instance_id, llm_output[0])

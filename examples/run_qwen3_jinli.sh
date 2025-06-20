@@ -53,7 +53,7 @@ python3 -m beyondagent.main_ppo \
     trainer.critic_warmup=0 \
     trainer.logger=['console'] \
     trainer.project_name='beyondagent' \
-    trainer.experiment_name='qwen3-8b_appworld_zyp' \
+    trainer.experiment_name='qwen3-8b_appworld_jinli' \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.test_freq=20 \
