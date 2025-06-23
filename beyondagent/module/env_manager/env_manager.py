@@ -127,7 +127,16 @@ class ParallelEnvManager(object):
             messages = trajectory.steps
             if len(messages) == 0:
                 # Fixme: empty trajectory yunpeng
-                messages = [{"role": "user", "content": ""}, {"role": "assistant", "content": ""}]
+                sample = Sample(
+                    data_id=trajectory.data_id,
+                    rollout_id=trajectory.rollout_id,
+                    messages=trajectory.steps,
+                    reward_scores=trajectory.reward.model_dump()
+                )
+                sample.discard()
+                samples.append(sample)
+                continue
+                # messages = [{"role": "user", "content": ""}, {"role": "assistant", "content": ""}]
             full_text = self.tokenizer.apply_chat_template(messages, tokenize=False)
             outputs = self.tokenizer(full_text, return_tensors="pt", padding=False)
             input_ids = outputs["input_ids"][0].tolist()  # 移除batch维度
