@@ -24,7 +24,7 @@ from beyondagent.schema.trajectory import Trajectory, Sample
 
 class ParallelEnvManager(object):
     def __init__(self, config: DictConfig, async_rollout_manager: BaAsyncLLMServerManager, max_parallel: int,
-                 max_llm_retries: int, **kwargs):
+                 max_llm_retries: int = 3, **kwargs):
         super().__init__(**kwargs)
 
         self.config: DictConfig = config

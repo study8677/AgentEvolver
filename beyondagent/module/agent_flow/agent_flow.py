@@ -62,7 +62,7 @@ class AgentFlow(BaseAgentFlow):
             try:
                 llm_output = self.llm_chat_fn(trajectory.steps, request_id=request_id)
             except Exception as e:
-                logger.exception(f"call llm_chat_fn error with {e.args}")
+                logger.exception(f"call llm_chat_fn error with {e}")
                 break
 
             time_cost = round(time.time() - t_start, 4)
@@ -83,7 +83,7 @@ class AgentFlow(BaseAgentFlow):
             try:
                 env_output = env.step(instance_id, llm_output)
             except Exception as e:
-                logger.exception(f"call env.step error with {e.args}")
+                logger.exception(f"call env.step error with {e}")
                 break
             # convert role_tool to role_user message
             # breakpoint()
