@@ -18,6 +18,7 @@ python3 -m beyondagent.main_ppo \
     --config-name='beyond_agent_dataflow' \
     env_service.env_url=$env_url \
     algorithm.adv_estimator=grpo \
+    actor_rollout_ref.actor.loss_agg_mode="token-mean" \
     data.train_batch_size=16 \
     data.max_prompt_length=4096 \
     data.max_response_length=20480 \
@@ -55,11 +56,11 @@ python3 -m beyondagent.main_ppo \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='beyondagent' \
-    trainer.experiment_name="qwen2.5-7b_appworld_${current_time}_8gpu" \
+    trainer.experiment_name="qwen2.5-7b_appworld_aggtoken_sparse_${current_time}_8gpu" \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.test_freq=20 \
-    trainer.total_epochs=15 \
+    trainer.total_epochs=20 \
     trainer.val_before_train=True \
     trainer.validation_data_dir="experiments/exp_${current_time}/validation_log" \
     trainer.rollout_data_dir="experiments/exp_${current_time}/rollout_log" \

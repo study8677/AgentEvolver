@@ -18,14 +18,16 @@ python3 -m beyondagent.main_ppo \
     --config-name='beyond_agent_dataflow' \
     env_service.env_url=$env_url \
     algorithm.adv_estimator=grpo \
-    data.train_batch_size=16 \
+    data.train_batch_size=32 \
     data.max_prompt_length=4096 \
     data.max_response_length=20480 \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.return_raw_chat=True \
+    actor_rollout_ref.rollout.use_qwen3=True \
+    actor_rollout_ref.rollout.enable_request_id=False \
     actor_rollout_ref.rollout.prompt_length=20480 \
-    actor_rollout_ref.rollout.response_length=4096 \
+    actor_rollout_ref.rollout.response_length=2048 \
     actor_rollout_ref.rollout.max_model_len=20480 \
     actor_rollout_ref.rollout.temperature=0.9 \
     actor_rollout_ref.model.path=/mnt/data_cpfs/xielipeng.xlp/models/Qwen3-14B \
@@ -53,14 +55,14 @@ python3 -m beyondagent.main_ppo \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name='beyondagent' \
-    trainer.experiment_name='qwen3-14b_appworld_zyp' \
+    trainer.experiment_name="qwen3-14b_appworld_bs32_8gpu" \
     trainer.nnodes=1 \
     trainer.save_freq=-1 \
     trainer.test_freq=20 \
     trainer.total_epochs=15 \
     trainer.val_before_train=True \
-    trainer.validation_data_dir="experiments/exp_14B_${current_time}/validation_log" \
-    trainer.rollout_data_dir="experiments/exp_14B_${current_time}/rollout_log" \
+    trainer.validation_data_dir="experiments/exp_${current_time}/validation_log" \
+    trainer.rollout_data_dir="experiments/exp_${current_time}/rollout_log" \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=20480 \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=20480 \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=20480 \
@@ -68,4 +70,8 @@ python3 -m beyondagent.main_ppo \
     critic.forward_max_token_len_per_gpu=20480 \
     data.train_files=/mnt/data_cpfs/zouanni.zan/data/appworld_parquet/train.parquet \
     data.val_files=/mnt/data_cpfs/zouanni.zan/data/appworld_parquet/dev.parquet \
+    experience_maker.enable_summarizer=False \
+    experience_maker.enable_context_generator=False \
+    experience_maker.workspace_id="w1_qwen25_v2_${current_time}" \
+    2>&1 | tee "$log_file" \
     $@

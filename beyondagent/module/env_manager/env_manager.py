@@ -120,7 +120,7 @@ class ParallelEnvManager(object):
                 result = future.result()
                 trajectory_list.append(result)
 
-            trajectory_list = sorted(trajectory_list, key=lambda x: (x.data_id, x.rollout_id))
+            trajectory_list = sorted(trajectory_list, key=lambda x: (int(x.data_id), x.rollout_id))
             return trajectory_list
 
     # TODO: define an extra class for trajectory-dataproto converting.
