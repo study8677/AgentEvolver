@@ -9,7 +9,7 @@ from beyondagent.schema.trajectory import Trajectory
 from loguru import logger
 
 
-class EnvWorker(object):
+class Explorer(object):
 
     def __init__(
         self,

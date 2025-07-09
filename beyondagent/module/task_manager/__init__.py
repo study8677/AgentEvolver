@@ -25,7 +25,7 @@ from beyondagent.module.agent_flow.agent_flow import AgentFlow
 from beyondagent.module.agent_flow.base_agent_flow import BaseAgentFlow
 from beyondagent.module.task_manager import adapter
 from beyondagent.module.task_manager.adapter import OnflyRlDataset, to_rl_dataset
-from beyondagent.module.task_manager.env_worker import EnvWorker
+from beyondagent.module.task_manager.explorer import Explorer
 from beyondagent.module.task_manager.filters import TaskPostFilter
 from beyondagent.module.task_manager.prompts.prompt_explore import (
     get_agent_interaction_system_prompt,
@@ -191,7 +191,7 @@ class TaskManager(object):
         Step 1: explore the environment to find out possible actions and their results.
         """
         # reset env every time
-        env_worker = EnvWorker(
+        env_worker = Explorer(
             env_type=task.env_type,
             task_id=task.task_id,
             instance_id=None,
