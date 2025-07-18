@@ -18,6 +18,7 @@ FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
 
+import os
 import uuid
 from collections import defaultdict
 from concurrent.futures.thread import ThreadPoolExecutor
@@ -564,6 +565,7 @@ class BeyondAgentRayPPOTrainer(RayPPOTrainer):
                             task_id=test_gen_batch.non_tensor_batch["extras"][i]["task_id"], 
                             query=test_gen_batch.non_tensor_batch["extras"][i]['new_query'],
                             env_type=self.config.env_service.env_type
+                            # evaluator=gen_batch.non_tensor_batch['extras'][i]['evaluator'], # avoid potential bugs
                          ) for i in range(len(test_gen_batch))]
                 print("=" * 10 + "start validate rollout" + "=" * 10)
                 trajectories = self.env_manager.rollout(tasks, mode="validate", epoch=f"test.1.{i}")
@@ -719,7 +721,7 @@ class BeyondAgentRayPPOTrainer(RayPPOTrainer):
                                         task_id=gen_batch.non_tensor_batch["extras"][i]["task_id"], 
                                         query=gen_batch.non_tensor_batch["extras"][i]['new_query'],
                                         env_type=self.config.env_service.env_type,
-                                        evaluator='synthetic' if gen_batch.non_tensor_batch['extras'][i]['synthetic'] else 'env',
+                                        evaluator=gen_batch.non_tensor_batch['extras'][i]['evaluator'],
                                     ) for i in range(len(gen_batch))]
 
                             # TODO enable tracing by jinli 0619
@@ -919,6 +921,13 @@ class BeyondAgentRayPPOTrainer(RayPPOTrainer):
                                 reward_extra_infos_dict=reward_extra_infos_dict,
                                 dump_path=rollout_data_dir,
                             )
+                            
+                            # save original trajectory
+                            filename = os.path.join(rollout_data_dir, f"traj_{self.global_steps}.jsonl")
+                            with open(filename, "w") as f:
+                                for traj in trajectories:
+                                    f.write(traj.json() + "\n")
+                            
 
                     # validate
                     if self.val_reward_fn is not None and self.config.trainer.test_freq > 0 and (is_last_step or self.global_steps % self.config.trainer.test_freq == 0):

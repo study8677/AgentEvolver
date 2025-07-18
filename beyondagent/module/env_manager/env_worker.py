@@ -34,7 +34,7 @@ class EnvWorker(object):
 
         try:
             state_message: list[dict] = init_response["state"]
-            assert isinstance(state_message,list), "state_message must be list"
+            assert isinstance(state_message,list) and len(state_message)==2, "state_message must be list and its length must be 2"
             # replace query if new query is in task
             if self.task.query is not None:
                 assert state_message[-1]["role"] == "user", "the latest message from environment must be user query"

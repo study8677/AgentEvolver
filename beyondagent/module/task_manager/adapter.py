@@ -13,7 +13,7 @@ from transformers.tokenization_utils import PreTrainedTokenizer
 from transformers.processing_utils import ProcessorMixin
 
 def convert_to_tasks(dataset:RLHFDataset,env_type:str)->list[Task]:
-    """将原本的 RLHFDataset 转为供 TaskManager 使用的 Task 列表
+    """将来自环境的原本 RLHFDataset 转为供 TaskManager 使用的 Task 列表
     """
     res=[]
     for record in dataset:
@@ -21,6 +21,7 @@ def convert_to_tasks(dataset:RLHFDataset,env_type:str)->list[Task]:
         task = Task(
             task_id=record["extras"]["task_id"],
             env_type=env_type,
+            evaluator="env",
         )
         res.append(task)
     
@@ -34,7 +35,7 @@ def to_rl_dataset(
 ) -> RLHFDataset:
     processed_records = []
 
-    for task_obj in tasks:
+    for id,task_obj in enumerate(tasks):
         task = task_obj.task
 
         # 构建 reward_model
@@ -43,13 +44,13 @@ def to_rl_dataset(
         # 构建单条记录
         record = {
             "data_source": task.env_type,
-            "prompt": [{"content": str(task.task_id)+str(task.query), "role": "user"}], # `prompt` is never used. trainer will get trajectories from env. metrics code needs this to group results.
+            "prompt": [{"content": str(task.task_id), "role": "user"}], # `prompt` is never used. trainer will get trajectories from env. metrics code needs this to group results.
             "reward_model": {"ground_truth": ground_truth, "style": "rule"},
             "uuid": str(uuid.uuid4()),
             "extras": {
                 "task_id": task.task_id,
                 "new_query": task.query,
-                "synthetic": task_obj.ground_truth!='[env]' # TODO: this is a temporary solution
+                "evaluator": task.evaluator,
             },
         }
 

@@ -18,6 +18,8 @@ class AgentFlow(BaseAgentFlow):
         super().__init__(**kwargs)
         # 优先传入的参数
         self._reward_calculator = reward_calculator
+        if self._reward_calculator is not None:
+            logger.info(f"reward_calculator={self._reward_calculator}")
         self._enable_context_generator = enable_context_generator
         # TODO: 重构代码，避免额外的适配
         if self._enable_context_generator==None:
