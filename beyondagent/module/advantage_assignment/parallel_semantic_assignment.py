@@ -223,7 +223,7 @@ async def _evaluate_single_task_vllm(model,
         )
 
 # ————————————————————————————————————————————————————————————————
-# API评估（OpenAI兼容）
+# API评估（OpenAI兼容）- 增强的重试机制
 # ————————————————————————————————————————————————————————————————
 
 async def _async_safe_query(client: AsyncOpenAI, 
@@ -312,7 +312,6 @@ async def _async_safe_query(client: AsyncOpenAI,
         
         raise last_exception
 
-
 async def _evaluate_single_task_api(client: AsyncOpenAI,
                                   model_name: str,
                                   task: EvaluationTask,
@@ -364,6 +363,7 @@ async def _evaluate_single_task_api(client: AsyncOpenAI,
 # ————————————————————————————————————————————————————————————————
 # 统一的并行评估接口
 # ————————————————————————————————————————————————————————————————
+
 async def evaluate_step_flags_parallel(tokenizer,
                                      batch,
                                      model_name: str = "qwen-max",
@@ -728,7 +728,7 @@ def apply_step_mask_vectorized(batch,
     return stats
 
 # ————————————————————————————————————————————————————————————————
-# 同步包装函数（更新为支持evaluation_type）
+# 同步包装函数（更新为支持evaluation_type和api_max_retries）
 # ————————————————————————————————————————————————————————————————
 
 def evaluate_step_flags(tokenizer,
@@ -739,7 +739,8 @@ def evaluate_step_flags(tokenizer,
                         evaluation_type: Literal["local", "api"] = "api",
                         use_parallel: bool = True,
                         max_concurrent: int = 20,
-                        mask_tensor: torch.Tensor = None) -> List[List[bool]]:
+                        mask_tensor: torch.Tensor = None,
+                        api_max_retries: int = 200) -> List[List[bool]]:
     """
     兼容性包装函数，可选择使用并行或串行版本，支持本地和API评估
     
@@ -752,6 +753,7 @@ def evaluate_step_flags(tokenizer,
         use_parallel: 是否使用并行版本
         max_concurrent: 最大并发数
         mask_tensor: 外部传入的mask tensor
+        api_max_retries: API调用的最大重试次数，特别用于处理429错误
     """
     if use_parallel:
         # 使用异步并行版本
@@ -768,7 +770,8 @@ def evaluate_step_flags(tokenizer,
                 model_name=model_name,
                 evaluation_type=evaluation_type,
                 max_concurrent=max_concurrent,
-                mask_tensor=mask_tensor  # 传入外部mask
+                mask_tensor=mask_tensor,  # 传入外部mask
+                api_max_retries=api_max_retries  # 传入API重试次数
             )
         )
         
@@ -812,7 +815,7 @@ def apply_step_mask(batch,
         raise NotImplementedError("Original version not included in vectorized implementation")
 
 # ————————————————————————————————————————————————————————————————
-# 统一的处理器类（支持evaluation_type）
+# 统一的处理器类（支持evaluation_type和api_max_retries）
 # ————————————————————————————————————————————————————————————————
 
 class ParallelSemanticProcessor:
@@ -822,11 +825,13 @@ class ParallelSemanticProcessor:
                  max_concurrent: int = 20,
                  batch_size_limit: int = 100,
                  model_name: str = "qwen-max",
-                 evaluation_type: Literal["local", "api"] = "api"):
+                 evaluation_type: Literal["local", "api"] = "api",
+                 api_max_retries: int = 200):
         self.max_concurrent = max_concurrent
         self.batch_size_limit = batch_size_limit
         self.model_name = model_name
         self.evaluation_type = evaluation_type
+        self.api_max_retries = api_max_retries
         
         # 根据评估类型调整默认参数
         if evaluation_type == "local":
@@ -839,7 +844,7 @@ class ParallelSemanticProcessor:
                 self.batch_size_limit = 32
         
         print(f"[ParallelSemanticProcessor] Initialized with evaluation_type={evaluation_type}")
-        print(f"[ParallelSemanticProcessor] Settings: model={model_name}, concurrent={self.max_concurrent}, batch_limit={self.batch_size_limit}")
+        print(f"[ParallelSemanticProcessor] Settings: model={model_name}, concurrent={self.max_concurrent}, batch_limit={self.batch_size_limit}, api_retries={self.api_max_retries}")
         
     async def process_batch(self, tokenizer, batch, 
                           good_scale: float = 1.0,
@@ -874,7 +879,8 @@ class ParallelSemanticProcessor:
             evaluation_type=self.evaluation_type,
             max_concurrent=self.max_concurrent,
             batch_size_limit=self.batch_size_limit,
-            mask_tensor=mask_tensor  # 传入外部mask
+            mask_tensor=mask_tensor,  # 传入外部mask
+            api_max_retries=self.api_max_retries  # 传入API重试次数
         )
         
         eval_time = time.time() - eval_start
@@ -911,7 +917,8 @@ class ParallelSemanticProcessor:
                 "max_concurrent": self.max_concurrent,
                 "evaluation_type": self.evaluation_type,
                 "using_vllm": self.evaluation_type == "local",
-                "model_name": self.model_name
+                "model_name": self.model_name,
+                "api_max_retries": self.api_max_retries
             }
         }
         
