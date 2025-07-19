@@ -65,3 +65,4 @@ semantic_advantage:
   neg_bad_scale: -0.2              # 负面坏步骤缩放因子
   concurrent: 20                   # 并发处理数量
   model: "qwen-max"              # 语义评估使用的模型
+  api_max_retries: 200             # API调用最大重试次数，默认200次

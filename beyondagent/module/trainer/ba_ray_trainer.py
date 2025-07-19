@@ -772,7 +772,7 @@ class BeyondAgentRayPPOTrainer(RayPPOTrainer):
                                 self._semantic_processor = ParallelSemanticProcessor(
                                     max_concurrent=semantic_config.concurrent,
                                     model_name=semantic_config.model,
-                                    evaluation_type=semantic_config.evaluation_type  # 🔧 新增：支持评估类型
+                                    evaluation_type=semantic_config.evaluation_type,  # 🔧 新增：支持评估类型
                                     api_max_retries=getattr(semantic_config, 'api_max_retries', 200)  # 支持配置重试次数
                                 )
                             # 根据配置选择mask类型

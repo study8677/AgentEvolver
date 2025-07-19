@@ -21,14 +21,15 @@ python3 -m beyondagent.main_ppo \
     save_dir=$EN_SAVE_DIR \
     algorithm.adv_estimator=grpo \
     semantic_advantage.enable=true \
-    semantic_advantage.evaluation_type='local' \
+    semantic_advantage.evaluation_type='api' \
     semantic_advantage.mask_type='response_mask' \
     semantic_advantage.mode='semantic' \
     semantic_advantage.good_scale=1.0 \
     semantic_advantage.bad_scale=0.2 \
     semantic_advantage.neg_bad_scale=-0.2 \
+    semantic_advantage.api_max_retries=200 \
     semantic_advantage.concurrent=10 \
-    semantic_advantage.model='/mnt/data_aisys_cpfs/xielipeng.xlp/models/Qwen3-4B' \
+    semantic_advantage.model='qwen-turbo' \
     data.train_batch_size=16 \
     data.max_prompt_length=4096 \
     data.max_response_length=20480 \
