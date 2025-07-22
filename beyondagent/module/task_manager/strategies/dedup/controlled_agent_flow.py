@@ -32,16 +32,16 @@ class ControlledAgentFlow(BaseAgentFlow):
     def execute(self, trajectory: Trajectory, env: EnvClient, instance_id: str, **kwargs) -> Trajectory:
         request_id: str = ""
         for act_step in range(self.max_steps):
-            # add instruction
+            # add exploration instruction
             records=self._state_recorder.get_state(trajectory)
             if len(records)>0:
-                instruction="In the past interactions at this moment, you have output these action and observed these states already:\n"
+                instruction="In the past interactions at this place, you have output these action and observed these states already:\n"
                 for id, record in enumerate(records):
                     instruction+=f"## {id+1}.\n"
                     instruction+=f"action:\n{record[0]}\n\n"
                     instruction+=f"state:\n{record[1]}\n\n"
                 instruction+="## Continue your work."
-                instruction+="Please continue your work. You are not expected to repeat the action you have already observed."
+                instruction+="Please continue your work. You are not expected to repeat the action you have already observed." # TODO: better strategy
                 trajectory.steps.append({"role":"system","content":instruction})
             
             # if use qwen3, add /no_think
