@@ -14,6 +14,8 @@ current_time=$(date "+%Y%m%d_%H%M%S")
 log_file="logs/qwen3/qwen3_14b_sparse_baseline2_${current_time}.log"
 EN_SAVE_DIR="./save_dir/save_entropy"
 
+swanlab login --api-key xSxgnzpo2HEXkIzoxD2Ua
+
 python3 -m beyondagent.main_ppo \
     --config-path="$CONFIG_PATH" \
     --config-name='beyond_agent_dataflow' \
