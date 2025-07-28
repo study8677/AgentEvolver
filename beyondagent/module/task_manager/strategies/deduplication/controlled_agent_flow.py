@@ -33,9 +33,10 @@ class ControlledAgentFlow(BaseAgentFlow):
 
     def execute(self, trajectory: Trajectory, env: EnvClient, instance_id: str, **kwargs) -> Trajectory:
         request_id: str = ""
+        trajectory=trajectory.copy(deep=True) # clone the trajectory to avoid side effect
         for act_step in range(self.max_steps):
             # remove old system prompt
-            new_steps=trajectory.steps.copy()
+            new_steps=[]
             for i in trajectory.steps:
                 if i['role']=='system':
                     if i['content'].find('In the past interactions at this place, you have output these action and observed these states already:')>=0:
@@ -52,11 +53,16 @@ class ControlledAgentFlow(BaseAgentFlow):
                     instruction+=f"[state]\n{record[1][:self._max_record_len]}\n\n"
                 instruction+="## Continue your work."
                 instruction+="Please continue your work. You are not expected to repeat the action you have already observed." # TODO: better strategy
-                trajectory.steps.append({"role":"system","content":instruction})
+                logger.debug(f"retrieve #records={len(records)}, #instruction={len(instruction)}")
+                
+                trajectory.steps.append({"role":"user","content":instruction})
+            
+            assert len(trajectory.steps)>2
+            assert trajectory.steps[0]['role'] == 'system'
             
             # if use qwen3, add /no_think
             if self.config.actor_rollout_ref.rollout.use_qwen3:
-                trajectory.steps[-1]["content"] = " /no_think     "+trajectory.steps[-1]["content"]
+                trajectory.steps[-1]["content"] += " /no_think"
 
             prompt_text = self.tokenizer.apply_chat_template(trajectory.steps, 
                                                              tokenize=False,
@@ -67,7 +73,7 @@ class ControlledAgentFlow(BaseAgentFlow):
             # because the message-type output will be applied chat_template.
             max_response_length = self.config.actor_rollout_ref.rollout.response_length
             if current_token_len + max_response_length > self.max_model_len:
-                logger.warning(f"exceed max model len={self.max_model_len}")
+                logger.warning(f"exceed max model, current_token_len={current_token_len}, max_response_length={max_response_length}, max_model_len={self.max_model_len}")
                 break
 
             enable_request_id = False

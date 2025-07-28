@@ -5,7 +5,7 @@ from typing import Callable, NotRequired, Optional, Sequence, TypedDict, Unpack
 from loguru import logger
 
 from beyondagent.module.agent_flow.base_agent_flow import BaseAgentFlow
-from beyondagent.module.task_manager.explorer import Explorer
+from beyondagent.module.task_manager.explorer import EnvWorkerWithPrompt
 from beyondagent.module.task_manager.strategies.random.prompts.prompt_explore import get_agent_interaction_system_prompt
 from beyondagent.module.task_manager.strategies.random.prompts.prompt_summarize import (
     get_task_summarize_prompt,
@@ -54,7 +54,7 @@ class LlmDedupSamplingExploreStrategy(TaskExploreStrategy):
         
     
     def explore(self, task: Task, data_id: str, rollout_id: str) -> list[Trajectory]:
-        env_worker = Explorer(
+        env_worker = EnvWorkerWithPrompt(
             env_type=task.env_type,
             task_id=task.task_id,
             instance_id=None,
