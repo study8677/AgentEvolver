@@ -69,7 +69,7 @@ task_manager:
     # where to cache the embeddings
     temp_db_path: ./.temp_vec_db
     # similarity threshold. two trajectories are considered arriving at the same state if their embeddings are above this threshold.
-    state_similarity_threshold: 0.9
+    state_similarity_threshold: 0.95
 
 
 experience_maker:
