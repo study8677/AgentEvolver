@@ -39,38 +39,52 @@ class ControlledAgentFlow(BaseAgentFlow):
         
         rng=random.Random(trajectory.steps[0]['content']) # use system prompt as seed
         for act_step in range(self.max_steps):
-            # remove old system prompt
-            new_steps=[]
-            for i in trajectory.steps:
-                if i['role']=='system':
-                    if i['content'].find('In the past interactions at this place, you have output these action and observed these states already:')>=0:
-                        continue
-                new_steps.append(i)
-            trajectory.steps=new_steps
-            # add exploration instruction
-            records=self._state_recorder.get_state(trajectory) # FIXME 可能基于 llm 的状态总结会更好一点
-            if len(records)>0:
-                instruction="In the past interactions at this place, you have output these action and observed these states already:\n"
-                
-                records_str=""
-                for id, record in enumerate(records):
-                    records_str+=f"## {id+1}.\n"
-                    records_str+=f"[action]\n{record[0][:self._max_record_len]}\n\n"
-                    records_str+=f"[state]\n{record[1][:self._max_record_len]}\n\n"
-                instruction+=self._compress_state_action(records_str)
-                instruction+="\n\n"
+            # -------- 1. 清理旧 system prompt --------
+            new_steps = [
+                s for s in trajectory.steps
+                if not (s["role"] == "system" and
+                        "In the past interactions at this place" in s["content"])
+            ]
+            trajectory.steps = new_steps
 
-                instruction+="## Continue your work"
-                # FIXME 这个 prompt 有点僵硬。探索-利用平衡
-                instruction+="Please continue your work. You can choose new action or repeat your old action." # TODO: better strategy
-                logger.debug(f"retrieve #records={len(records)}, #instruction={len(instruction)}")
-                
-                from pprint import pprint
-                pprint(instruction)
-                
-                # TODO 随机性加入 instructions
-                if rng.random()<=1.0:
-                    trajectory.steps.append({"role":"user","content":instruction})
+            # -------- 2. 生成 records --------
+            records = self._state_recorder.get_state(trajectory)
+            if len(records) == 0:
+                continue
+
+            records_str = []
+            for idx, (action, state) in enumerate(records, start=1):
+                records_str.append(f"## {idx}\n[action]\n{action[:self._max_record_len]}"
+                                f"\n\n[state]\n{state[:self._max_record_len]}\n")
+            records_str = "\n".join(records_str)
+            records_str = self._compress_state_action(records_str)
+
+            # -------- 3. 组装强化版 prompt --------
+            instruction = f"""## Local Context
+You are currently **at the same location / state** as in the log below.
+
+### Interaction Log (collapsed)
+{records_str}
+
+## Decision Guidelines
+1. Prefer an **untried** action if it has a plausible chance of revealing new reward-relevant information.
+2. You may **repeat** a previous action only if
+a) it delivered high reward and you expect the reward to persist, **or**
+b) you need confirmation to reduce uncertainty.
+3. Avoid infinite loops: never repeat the same low-value action more than **2** times.
+4. Think step-by-step and output your reasoning before taking action (max 100 tokens).
+5. Return **exactly one** action.
+
+Now decide the single best next action.""".strip()
+
+            logger.debug("retrieve #records=%d, prompt_len=%d",len(records), len(instruction))
+
+            # -------- 4. 随机或固定策略把 prompt 写入对话 --------
+            if rng.random() <= 1.0:     # 这里仍然可调探索概率
+                trajectory.steps.append({
+                    "role": "user",
+                    "content": instruction
+                })
             
             assert len(trajectory.steps)>2
             assert trajectory.steps[0]['role'] == 'system'
