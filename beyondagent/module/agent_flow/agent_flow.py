@@ -30,9 +30,8 @@ class AgentFlow(BaseAgentFlow):
 
     def execute(self, trajectory: Trajectory, env: EnvClient, instance_id: str, **kwargs) -> Trajectory:
         # TODO refactor this
-        # FIXME debug to see if env grader is called
-        # if isinstance(self._reward_calculator,EnvGrader):
-        #     self._reward_calculator.set_instance_id(instance_id)
+        if isinstance(self._reward_calculator,EnvGrader):
+            self._reward_calculator.set_instance_id(instance_id)
         
         # In some cases, context_generator will be disabled by setting self._enable_context_generator to False.
         if self._enable_context_generator:
