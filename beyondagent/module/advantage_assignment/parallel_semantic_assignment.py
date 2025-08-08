@@ -28,7 +28,7 @@ class EvaluationTask:
     sample_idx: int
     query: str
     rollout: str
-    steps: List[str]  # 所有step的文本列表
+    steps: List[Dict[str, str]]  # ← 原来是 List[str]，统一为 parse_rollout_to_steps 的结构
     overall_adv: float
 
 @dataclass
@@ -61,6 +61,17 @@ class EvaluationRecord:
 # =========================================================
 import re 
 
+def _steps_struct_to_text_list(steps: List[Dict[str, str]]) -> List[str]:
+    out = []
+    for st in steps:
+        act = (st.get("action") or "").strip()
+        obs = (st.get("observation") or "").strip()
+        if obs:
+            out.append(f"{act}\n\n[OBSERVATION]\n{obs}")
+        else:
+            out.append(act)
+    return out
+
 def parse_rollout_to_steps(rollout: str) -> List[Dict[str, str]]:
     """
     将包含 ... assistant\n<action text>\nuser\n<observation text> ... 的长串 rollout 拆成步骤列表。
@@ -86,48 +97,41 @@ def parse_rollout_to_steps(rollout: str) -> List[Dict[str, str]]:
 
 def build_batch_evaluation_prompt(
         query: str,
-        steps: List[Dict[str, str]],
+        steps: list[dict],
         overall_adv: float,
         max_step_chars: int = 2000,
-) -> List[dict]:
-    """
-    • SYSTEM message: 说明输入字段与评估任务
-    • USER  message : 实际传入的数据
-    """
+) -> list[dict]:
     polarity = "positive" if overall_adv > 0 else "negative"
 
-    # ---------------- system ----------------
     sys_msg = (
         "You are an expert *process* reward evaluator.\n\n"
-        "The single message you receive always contains three labelled sections:\n"
-        "  1. OVERALL ADVANTAGE – a scalar summarising the final answer quality.\n"
-        "  2. TASK DESCRIPTION   – the user's original request.\n"
-        "  3. SOLUTION TRAJECTORY – a numbered list of assistant steps.\n\n"
-        "Evaluation rule:\n"
-        "• If OVERALL ADVANTAGE is **positive (> 0)**, judge each step by whether its ACTION\n"
-        "  makes the overall answer *even better* than before (incremental improvement).\n"
-        "• If OVERALL ADVANTAGE is **negative (< 0)**, the trajectory contains fundamental errors.\n"
-        "  Mark GOOD **only** when the ACTION:\n"
-        "  - Fixes a technical error AND moves toward the correct final goal, OR\n"
-        "  - Corrects a misunderstanding of the task requirements, OR  \n"
-        "  - Challenges/questions previous incorrect assumptions\n"
-        "  Mark BAD if the ACTION:\n"
-        "  - Continues building on incorrect foundations, OR\n"
-        "  - Makes progress in the wrong direction, OR\n"
-        "  - 'Completes' a fundamentally flawed solution\n\n"
-        "Key principle: When overall advantage is negative, technical competence in the wrong\n"
-        "direction is still BAD. Focus on whether each step moves toward the CORRECT solution\n"
-        "of the ORIGINAL task, not just whether it executes well.\n\n"
-        "Ignore superficial politeness or formatting. Focus strictly on whether the ACTION\n"
-        "brings the solution closer to correctly solving the user's actual request.\n\n"
-        "Reply IN THE REQUIRED OUTPUT FORMAT and output nothing else."
+        "Input has three sections:\n"
+        "1) OVERALL ADVANTAGE – scalar for final answer quality\n"
+        "2) TASK DESCRIPTION  – the user's original request\n"
+        "3) SOLUTION TRAJECTORY – numbered steps (ACTION, optional OBSERVATION)\n\n"
+        "Rules:\n"
+        "• If OVERALL ADVANTAGE > 0 → GOOD only if the ACTION makes the answer better; else BAD.\n"
+        "• If OVERALL ADVANTAGE < 0 → DEFAULT = BAD. Mark GOOD ONLY IF ALL hold:\n"
+        "   (A) The step explicitly DIAGNOSES a prior error/assumption, AND\n"
+        "   (B) The ACTION implements a concrete FIX redirecting toward the correct goal, AND\n"
+        "   (C) The OBSERVATION shows EVIDENCE the fix worked (e.g., auth succeeds, correct list, error disappears).\n"
+        "   If any of A/B/C missing → BAD. \"Reasonable attempts\" without diagnosis+evidence → BAD.\n\n"
+        "Always BAD when advantage < 0:\n"
+        "• Continuing the wrong plan, or finalising/submitting a wrong result\n"
+        "• Repeating the same failure class without new diagnosis/redirect\n"
+        "• Using unsupported/unspecified interfaces/params, or acting on unverified assumptions\n"
+        "• Performing irreversible ops (delete/overwrite/complete) without validating preconditions\n\n"
+        "Output requirement (strict): For every step you mark GOOD when advantage < 0, your Step Analysis MUST include a line starting with:\n"
+        "  Evidence: \"<verbatim snippet from this step's OBSERVATION>\"\n"
+        "If you cannot quote such evidence from this step's OBSERVATION, mark BAD.\n\n"
+        "Judge strictly by whether each ACTION reduces the gap to correctly solving the ORIGINAL task.\n"
+        "Reply ONLY in the required output format."
     )
 
-    # ---------------- helpers ----------------
-    def _trim(txt: str) -> str:
-        return txt if len(txt) <= max_step_chars else txt[:max_step_chars] + "\n…"
+    def _trim(s: str) -> str:
+        if not s: return ""
+        return s if len(s) <= max_step_chars else s[:max_step_chars] + "\n…"
 
-    # ---------------- user ----------------
     user_parts = [
         f"**OVERALL ADVANTAGE {overall_adv:+.4f} ({polarity})**",
         "",
@@ -137,28 +141,25 @@ def build_batch_evaluation_prompt(
         f"### SOLUTION TRAJECTORY  (total {len(steps)} steps)",
     ]
 
-    for idx, st in enumerate(steps):
+    for i, st in enumerate(steps):
         block = [
-            f">>> EVAL-STEP {idx} <<<",
+            f">>> EVAL-STEP {i} <<<",
             "<|ACTION|>",
-            _trim(st['action']),
+            _trim(st.get("action","")),
             "<|END|>",
         ]
-        if st['observation']:
-            block += [
-                "<|OBSERVATION|>",
-                _trim(st['observation']),
-                "<|END|>",
-            ]
+        obs = st.get("observation")
+        if obs:
+            block += ["<|OBSERVATION|>", _trim(obs), "<|END|>"]
         user_parts.append("\n".join(block))
 
     user_parts += [
         "",
         "---",
         "Evaluation reminder:",
-        "• Positive overall advantage → ask: *Does this step further improve the answer?*",
-        "• Negative overall advantage → ask: *Does this step move toward correctly solving the ORIGINAL task?*",
-        "  (Technical competence in wrong direction = BAD)",
+        "• Positive advantage → Did this step IMPROVE the answer?",
+        "• Negative advantage → DIAGNOSIS + FIX + EVIDENCE (quoted). If evidence missing → BAD.",
+        "  (Continuing wrong plan / repeating same failure / finalising wrong result → BAD)",
         "",
         "REQUIRED OUTPUT FORMAT:",
         "Step 0 Analysis: <your reasoning>",
@@ -172,7 +173,7 @@ def build_batch_evaluation_prompt(
 
     return [
         {"role": "system", "content": sys_msg},
-        {"role": "user",   "content": "\n".join(user_parts)},
+        {"role": "user", "content": "\n".join(user_parts)},
     ]
 
 def build_batch_evaluation_prompt_from_rollout(query: str, rollout: str, overall_adv: float, max_step_chars: int = 2000):
@@ -406,7 +407,7 @@ async def _evaluate_single_sample_api(
                 sample_idx=task.sample_idx,
                 query=task.query,
                 rollout=task.rollout,
-                steps=task.steps,
+                steps=_steps_struct_to_text_list(task.steps),  # ← 关键
                 overall_adv=task.overall_adv,
                 llm_input_messages=messages,
                 llm_raw_output=llm_raw_output,
@@ -484,7 +485,7 @@ async def evaluate_step_flags_parallel(tokenizer, batch, model_name: str = "qwen
         print("❌ [parallel_eval] No API key found in DASHSCOPE_API_KEY environment variable")
         print("❌ [parallel_eval] Please set: export DASHSCOPE_API_KEY='your-api-key'")
         print("❌ [parallel_eval] Using random fallback for evaluation")
-        return _apply_fallback_strategy_parallel(batch), {"fallback_used": True, "evaluation_type": evaluation_type}
+        return _apply_fallback_strategy_parallel(batch, tokenizer), {"fallback_used": True, "evaluation_type": evaluation_type}
     
     api_client = AsyncOpenAI(
         api_key=api_key,
@@ -511,26 +512,29 @@ async def evaluate_step_flags_parallel(tokenizer, batch, model_name: str = "qwen
     for sample_idx in range(batch_size):
         query = tokenizer.decode(batch.batch["prompts"][sample_idx], skip_special_tokens=True)
         rollout = tokenizer.decode(batch.batch["responses"][sample_idx], skip_special_tokens=True)
-        steps = batch.non_tensor_batch["steps"][sample_idx]
         
+        # ✅ 统一真相源：从 rollout 解析 steps（action/observation）
+        steps_struct = parse_rollout_to_steps(rollout)
+
+        # mask 与 overall_adv 维持原逻辑
         sample_mask = response_mask[sample_idx]
         overall_adv = _get_overall_advantage(batch.batch["advantages"][sample_idx], sample_mask)
-        
+
         if abs(overall_adv) < 1e-8:
             print(f"[parallel_eval] Sample {sample_idx}: advantage≈0 ({overall_adv:.6f}), skipping evaluation, returning all GOOD")
-            flags_per_sample[sample_idx] = [True] * len(steps)
-            skipped_samples += 1
-            
+            flags_per_sample[sample_idx] = [True] * len(steps_struct)
+
             if save_dir:
                 record = EvaluationRecord(
                     sample_idx=sample_idx,
                     query=query,
                     rollout=rollout,
-                    steps=steps,
+                    # ✅ 日志里仍按原来的 List[str] 存
+                    steps=_steps_struct_to_text_list(steps_struct),
                     overall_adv=overall_adv,
                     llm_input_messages=[],
                     llm_raw_output="SKIPPED_ZERO_ADVANTAGE",
-                    llm_parsed_results=[True] * len(steps),
+                    llm_parsed_results=[True] * len(steps_struct),
                     response_time=0.0,
                     timestamp=time.time(),
                     model_name=model_name,
@@ -539,21 +543,23 @@ async def evaluate_step_flags_parallel(tokenizer, batch, model_name: str = "qwen
                     epoch=epoch
                 )
                 _save_evaluation_record(record, save_dir)
+            skipped_samples += 1
             continue
+
         
-        # 🚀 关键优化：一个sample一个任务，而不是每个step一个任务
+       # ✅ EvaluationTask 使用结构化 steps
         task = EvaluationTask(
             sample_idx=sample_idx,
             query=query,
             rollout=rollout,
-            steps=steps,
+            steps=steps_struct,
             overall_adv=overall_adv
         )
         all_tasks.append(task)
     
     total_tasks = len(all_tasks)
     total_api_calls = total_tasks  # 现在每个sample只需要一次API调用
-    total_steps = sum(len(batch.non_tensor_batch["steps"][i]) for i in range(batch_size))
+    total_steps = sum(len(t.steps) for t in all_tasks)
     
     print(f"[parallel_eval] 🚀 EFFICIENCY GAIN:")
     print(f"[parallel_eval]   - Total samples: {batch_size}")
@@ -635,18 +641,21 @@ async def evaluate_step_flags_parallel(tokenizer, batch, model_name: str = "qwen
     await api_client.close()
     return flags_per_sample, stats
 
-def _apply_fallback_strategy_parallel(batch) -> List[List[bool]]:
-    """API 不可用时的并行 fallback：全部禁用缩放"""
+def _apply_fallback_strategy_parallel(batch, tokenizer) -> List[List[bool]]:
+    """API 不可用时的并行 fallback：全部禁用缩放（按 rollout 解析的步数返回均一标记）"""
     flags_per_sample = []
     advantages = batch.batch["advantages"]
+    bs = len(batch.batch["prompts"])
 
-    for sample_idx, steps in enumerate(batch.non_tensor_batch["steps"]):
-        # 用 advantages 的符号来决定“无缩放”时应该返回 GOOD 还是 BAD
+    for sample_idx in range(bs):
+        rollout = tokenizer.decode(batch.batch["responses"][sample_idx], skip_special_tokens=True)
+        steps_struct = parse_rollout_to_steps(rollout)
         overall_adv = _get_overall_advantage(advantages[sample_idx])
         uniform_flag = overall_adv > 0  # True=GOOD, False=BAD
-        flags_per_sample.append([uniform_flag for _ in steps])
+        flags_per_sample.append([uniform_flag for _ in range(len(steps_struct))])
 
     return flags_per_sample
+
 
 # ————————————————————————————————————————————————————————————————
 # 向量化的mask应用
@@ -682,7 +691,30 @@ def apply_step_mask_vectorized(batch, step_flags: List[List[bool]], consistent_s
         overall_advs.append(overall_adv)
     overall_advs = torch.tensor(overall_advs, device=adv.device)
     overall_pos = overall_advs > 0
+    
+    aligned_step_flags = []
+    for b in range(bs):
+        flags_b = list(step_flags[b])
+        sample_step_ids = step_ids[b]
+        if (sample_step_ids >= 0).any():
+            token_step_cnt = int(sample_step_ids.max().item()) + 1
+        else:
+            token_step_cnt = 0
 
+        if len(flags_b) != token_step_cnt:
+            # 依据 overall_adv 的符号来填充（或截断）
+            default_flag = bool(overall_pos[b].item())
+            if len(flags_b) < token_step_cnt:
+                # 填充到 token 步数
+                flags_b.extend([default_flag] * (token_step_cnt - len(flags_b)))
+                print(f"[vectorized_mask][WARN] sample {b}: step_flags {len(step_flags[b])} < token_steps {token_step_cnt}. PAD with {default_flag}.")
+            else:
+                # 截断到 token 步数（无 token 的“多余步”无法施加缩放）
+                flags_b = flags_b[:token_step_cnt]
+                print(f"[vectorized_mask][WARN] sample {b}: step_flags {len(step_flags[b])} > token_steps {token_step_cnt}. TRUNCATE to token steps.")
+
+        aligned_step_flags.append(flags_b)
+        
     scale = torch.ones_like(adv)
 
     stats = {
@@ -703,7 +735,7 @@ def apply_step_mask_vectorized(batch, step_flags: List[List[bool]], consistent_s
     }
 
     for b in tqdm(range(bs), desc="[vectorized_mask] Processing samples"):
-        current_step_flags = step_flags[b]
+        current_step_flags = aligned_step_flags[b]
         overall_adv_sum = overall_advs[b].item()
 
         if abs(overall_adv_sum) < 1e-8:
