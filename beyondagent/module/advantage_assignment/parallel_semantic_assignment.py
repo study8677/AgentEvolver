@@ -129,7 +129,7 @@ def build_batch_evaluation_prompt(
     # )
     
     # prompt1
-    sys = """You are an expert *process* reward evaluator.
+    sys_msg = """You are an expert *process* reward evaluator.
 
 The single message you receive always contains three labelled sections:
   1. OVERALL ADVANTAGE – a scalar summarising the final answer quality.
@@ -681,7 +681,7 @@ def _apply_fallback_strategy_parallel(batch, tokenizer) -> List[List[bool]]:
 # 向量化的mask应用
 # ————————————————————————————————————————————————————————————————
 
-def apply_step_mask_vectorized(batch, step_flags: List[List[bool]], consistent_scale: float = 1.0, pos_unconsistent_scale: float = 0.2, neg_unconsistent_scale: float = -0.2, mask_tensor: torch.Tensor = None) -> Dict:
+def apply_step_mask_vectorized(tokenizer, batch, step_flags: List[List[bool]], consistent_scale: float = 1.0, pos_unconsistent_scale: float = 0.2, neg_unconsistent_scale: float = -0.2, mask_tensor: torch.Tensor = None) -> Dict:
     """向量化版本的step mask应用"""
     print(f"[vectorized_mask] Starting vectorized mask application")
 
@@ -716,8 +716,14 @@ def apply_step_mask_vectorized(batch, step_flags: List[List[bool]], consistent_s
     for b in range(bs):
         flags_b = list(step_flags[b])
         sample_step_ids = step_ids[b]
+        rollout = tokenizer.decode(batch.batch["responses"][b], skip_special_tokens=True)
+        actual_steps = parse_rollout_to_steps(rollout)
+        token_step_cnt = len(actual_steps)  # ✅ 直接使用正确解析的步骤数
         if (sample_step_ids >= 0).any():
-            token_step_cnt = int(sample_step_ids.max().item()) + 1
+            max_step_id = int(sample_step_ids.max().item())
+            min_step_id = int(sample_step_ids[sample_step_ids >= 0].min().item())
+            print(f"[DEBUG] Sample {b}: step_ids range [{min_step_id}, {max_step_id}], "
+                  f"parsed_steps={token_step_cnt}, flags={len(flags_b)}")
         else:
             token_step_cnt = 0
 
@@ -727,11 +733,10 @@ def apply_step_mask_vectorized(batch, step_flags: List[List[bool]], consistent_s
             if len(flags_b) < token_step_cnt:
                 # 填充到 token 步数
                 flags_b.extend([default_flag] * (token_step_cnt - len(flags_b)))
-                print(f"[vectorized_mask][WARN] sample {b}: step_flags {len(step_flags[b])} < token_steps {token_step_cnt}. PAD with {default_flag}.")
+                print(f"[vectorized_mask][INFO] sample {b}: step_flags {len(step_flags[b])} < token_steps {token_step_cnt}. PAD with {default_flag}.")
             else:
-                # 截断到 token 步数（无 token 的“多余步”无法施加缩放）
                 flags_b = flags_b[:token_step_cnt]
-                print(f"[vectorized_mask][WARN] sample {b}: step_flags {len(step_flags[b])} > token_steps {token_step_cnt}. TRUNCATE to token steps.")
+                print(f"[vectorized_mask][INFO] sample {b}: step_flags {len(step_flags[b])} > token_steps {token_step_cnt}. TRUNCATE to token steps.")
 
         aligned_step_flags.append(flags_b)
         
@@ -876,6 +881,7 @@ class ParallelSemanticProcessor:
         mask_start = time.time()
         
         mask_stats = apply_step_mask_vectorized(
+            tokenizer=tokenizer,
             batch=batch,
             step_flags=step_flags,
             consistent_scale=consistent_scale,
@@ -965,6 +971,7 @@ def apply_step_mask(batch, step_flags: List[List[bool]], consistent_scale: float
         raise ValueError("❌ Only vectorized version is supported")
     
     stats = apply_step_mask_vectorized(
+        tokenizer=tokenizer,
         batch=batch,
         step_flags=step_flags,
         consistent_scale=consistent_scale,
