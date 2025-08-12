@@ -1,6 +1,6 @@
 import re
 import threading
-from typing import Optional, cast
+from typing import Any, Optional, cast
 from loguru import logger
 from beyondagent.client.env_client import EnvClient
 from beyondagent.client.llm_client import DashScopeClient
@@ -45,6 +45,10 @@ Score 1 ONLY if ALL conditions are met:
 - All intermediate steps are correct
 Score 0 if ANY failure occurs
 
+To evaluate the steps, we provide you with a reference solution to compare against. Please note that this solution demonstrates a correct approach and outcome, but it may not be the *only* correct way to solve the task. A different but equally valid solution should also be considered successful.
+
+{reference_trajs}
+
 ### Mandatory Constraints
 - Never combine scores or calculate totals
 - Critical failure overrides all other checks
@@ -72,8 +76,30 @@ Over the past period of time, the average score you gave to some samples was {ru
 Please note that the average score must be maintained around {mean_score:.4f} (+-0.2), or you will be penalized.
 """
 
-@grader_manager.reg("llm-binary")
-class LlmAsJudgeBinaryRewardCalculator(RewardCalculator):
+def steps_to_msg(steps: list[dict[str, Any]]) -> str:
+    # 添加轨迹消息（将所有对话转换为一个连贯的文本）
+    trajectory_text = ""
+    assert steps[0]['role'] == 'assistant'
+    for i, msg in enumerate(steps):
+        role = msg.get("role", "unknown")
+        if role == 'assistant':
+            block = f""">>> STEP {i} <<<
+<|ACTION|>
+{msg['content']}
+<|END|>
+"""
+        elif role == "user":
+            block = f"""<|OBSERVATION|>
+{msg['content']}
+<|END|>
+"""
+        else:
+            raise ValueError("roles in trajectory must be assistant or user")
+        trajectory_text += block.strip() + "\n\n"
+    return trajectory_text
+
+@grader_manager.reg("llm-binary-gt")
+class LlmAsJudgeBinaryRewardCalculatorWithGT(RewardCalculator):
     """
     RewardCalculator that uses LLM as judge.
     """
@@ -93,7 +119,7 @@ class LlmAsJudgeBinaryRewardCalculator(RewardCalculator):
         更新类变量 `_running_judge_mean`，用锁来保证线程安全。
         """
         with cls._update_lock:
-            cls._running_judge_mean = 0.9*cls._running_judge_mean + 0.1 * new_score
+            cls._running_judge_mean = 0.9 * cls._running_judge_mean + 0.1 * new_score
 
     @classmethod
     def get_running_judge_mean(cls):
@@ -109,47 +135,40 @@ class LlmAsJudgeBinaryRewardCalculator(RewardCalculator):
         Args:
             trajectory (Trajectory): trajectory to pack
         """
-        messages=[]
+        messages = []
         
-        assert len(trajectory.steps)>=2 and trajectory.steps[1]['role']=='user', "trajectory must start with system message and then user message"
-        task_query=trajectory.steps[1]['content']
-        # 添加轨迹消息（将所有对话转换为一个连贯的文本）
-        trajectory_text = ""
-        for i, msg in enumerate(trajectory.steps[2:]):
-            role = msg.get("role", "unknown")
-            if role == 'assistant':
-                block=f""">>> STEP {i} <<<
-<|ACTION|>
-{msg['content']}
-<|END|>
-"""
-            elif role == "user":
-                block=f"""<|OBSERVATION|>
-{msg['content']}
-<|END|>
-"""
-            else:
-                raise ValueError("roles in trajectory must be assistant or user")
-            trajectory_text += block.strip() + "\n\n"
+        assert len(trajectory.steps) >= 2 and trajectory.steps[1]['role'] == 'user', "trajectory must start with system message and then user message"
+        task_query = trajectory.steps[1]['content']
         
-        messages.append({"role":"user","content":USER_PROMPT.format(task=task_query,trajs=trajectory_text, running_mean=self.get_running_judge_mean(), mean_score=self._mean_score)})
+        # TODO 至少现在我们的合成任务 gt 一定不是空的
+        assert self.task.ground_truth is not None, "ground truth must not be None for synthetic task"
+        messages.append({
+            "role": "user",
+            "content": USER_PROMPT.format(
+                task=task_query, 
+                trajs=steps_to_msg(trajectory.steps[2:]),
+                running_mean=self.get_running_judge_mean(),
+                mean_score=self._mean_score, reference_trajs=self.task.ground_truth or "[No solution provided, please judge the task by yourself]"
+                )
+            }
+        )
         return messages
 
     
     def calculate_reward(self, trajectory: Trajectory, env: EnvClient, instance_id: str) -> float:
-        x=cast(float,self._calculate_reward(trajectory,env,eject_llm_output=False))
+        x = cast(float, self._calculate_reward(trajectory, env, eject_llm_output=False))
         return x
         
 
-    def _calculate_reward(self, trajectory: Trajectory, env:EnvClient, *, eject_llm_output:bool=False):
+    def _calculate_reward(self, trajectory: Trajectory, env: EnvClient, *, eject_llm_output: bool = False):
         """Calculate reward for a trajectory in specific environment.
         
         Args:
             trajectory (Trajectory): trajectory to calculate reward
             env (EnvClient): environment where the trajectory is executed
         """
-        response=""
-        for chunk in self._client.chat_stream_with_retry(messages=self.pack_message(trajectory),max_retries=64):
+        response = ""
+        for chunk in self._client.chat_stream_with_retry(messages=self.pack_message(trajectory), max_retries=64):
             response += chunk
         
         # 默认分数
@@ -169,7 +188,7 @@ class LlmAsJudgeBinaryRewardCalculator(RewardCalculator):
                 if critical:
                     score = 0.0
                 else:
-                    score = 0.2*intent_score+0.8*correct_score
+                    score = 0.2 * intent_score + 0.8 * correct_score
                     score = correct_score
 
                 logger.info(

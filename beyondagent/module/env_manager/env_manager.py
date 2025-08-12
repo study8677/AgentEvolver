@@ -21,7 +21,8 @@ from beyondagent.module.trainer.ba_async_llm_server_manager import BaAsyncLLMSer
 from beyondagent.module.task_manager.rewards import grader_manager
 from beyondagent.schema.task import Task
 from beyondagent.schema.trajectory import Trajectory, Sample
-from beyondagent.module.task_manager.rewards import LlmAsJudgeRewardCalculator,LlmAsJudgeRewardCalculatorWithGT, LlmAsJudgeBinaryRewardCalculator,grader_manager
+# do not delete this line
+from beyondagent.module.task_manager.rewards import LlmAsJudgeRewardCalculator,LlmAsJudgeRewardCalculatorWithGT,LlmAsJudgeBinaryRewardCalculator,LlmAsJudgeBinaryRewardCalculatorWithGT,EnvGrader
 
 
 class ParallelEnvManager(object):
@@ -94,11 +95,7 @@ class ParallelEnvManager(object):
 
         llm_chat_fn = self.get_llm_chat_fn(sampling_params)
         
-        # TODO refactor this
-        reward_caculator=grader_manager.get_calculator(task.evaluator)
-        if isinstance(reward_caculator,LlmAsJudgeRewardCalculatorWithGT):
-            reward_caculator.set_gt(task.ground_truth)
-        # 注意有一些 reward calculator 是单例类，因为此处是多线程，所以不需要担心信息共享的问题
+        reward_caculator=grader_manager.get_calculator(task.evaluator, task=task)
         agent_flow: BaseAgentFlow = AgentFlow(
             reward_calculator=reward_caculator,
             llm_chat_fn=llm_chat_fn, 

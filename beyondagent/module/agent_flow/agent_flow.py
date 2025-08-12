@@ -11,7 +11,6 @@ from beyondagent.module.agent_flow.reward_calculator import RewardCalculator
 from beyondagent.schema.trajectory import Trajectory
 from beyondagent.utils.utils import convert_tool_to_user_message, clip_state_content_correctly
 
-from beyondagent.module.task_manager.rewards import LlmAsJudgeRewardCalculator,LlmAsJudgeRewardCalculatorWithGT,EnvGrader
 
 class AgentFlow(BaseAgentFlow):
 
@@ -29,10 +28,6 @@ class AgentFlow(BaseAgentFlow):
         self.em_client = EMClient(base_url=self.config.experience_maker.base_url)
 
     def execute(self, trajectory: Trajectory, env: EnvClient, instance_id: str, **kwargs) -> Trajectory:
-        # TODO refactor this
-        if isinstance(self._reward_calculator,EnvGrader):
-            self._reward_calculator.set_instance_id(instance_id)
-        
         # In some cases, context_generator will be disabled by setting self._enable_context_generator to False.
         if self._enable_context_generator:
             history_experience = self.em_client.call_context_generator(
@@ -130,7 +125,7 @@ class AgentFlow(BaseAgentFlow):
             if trajectory.is_terminated:
                 break
         if self._reward_calculator is not None:
-            score = self._reward_calculator.calculate_reward(trajectory, env)
+            score = self._reward_calculator.calculate_reward(trajectory, env, instance_id)
         else:
             score = env.evaluate(instance_id, params={"sparse": True})
         trajectory.reward.outcome = score

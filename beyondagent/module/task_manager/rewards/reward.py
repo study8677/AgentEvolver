@@ -2,6 +2,7 @@ from typing import cast
 from beyondagent.client.env_client import EnvClient
 from beyondagent.client.llm_client import DashScopeClient
 from beyondagent.module.agent_flow.reward_calculator import RewardCalculator
+from beyondagent.schema.task import Task
 from beyondagent.schema.trajectory import Trajectory
 
 from . import grader_manager
@@ -61,7 +62,8 @@ class LlmAsJudgeRewardCalculator(RewardCalculator):
     
     TODO: This is a temperary solution for synthetic data.
     """
-    def __init__(self, model_name='qwq-plus'):
+    def __init__(self,task:Task, model_name='qwq-plus'):
+        super().__init__(task)
         self._client=DashScopeClient(model_name=model_name)
     
     def pack_message(self, trajectory: Trajectory):
@@ -83,7 +85,7 @@ class LlmAsJudgeRewardCalculator(RewardCalculator):
         messages.append({"role":"user","content":USER_PROMPT})
         return messages
     
-    def calculate_reward(self, trajectory: Trajectory, env: EnvClient) -> float:
+    def calculate_reward(self, trajectory: Trajectory, env: EnvClient, instance_id: str) -> float:
         x=cast(float,self._calculate_reward(trajectory,env,eject_llm_output=False))
         return x
         

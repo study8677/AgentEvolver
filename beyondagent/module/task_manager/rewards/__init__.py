@@ -37,7 +37,7 @@ class RewardCalculatorManager:
             cls._instance = super().__new__(cls)
         return cls._instance
 
-    def reg(self, name: str, *, singleton: bool = False) -> Callable:
+    def reg(self, name: str) -> Callable:
         """
         注册装饰器。将一个类与一个给定的名称关联起来。
         可通过 singleton=True 将该计算器以全局单例方式提供。
@@ -57,7 +57,7 @@ class RewardCalculatorManager:
             if name in self._registry:
                 print(f"警告：名称 '{name}' 已被注册，将被新的类 '{calculator_cls.__name__}' 覆盖。")
             # 覆盖注册时，若此前有单例实例，会被丢弃并以新类为准
-            self._registry[name] = _RegEntry(cls=calculator_cls, singleton=singleton, instance=None)
+            self._registry[name] = _RegEntry(cls=calculator_cls, singleton=False, instance=None)
             return calculator_cls
         return decorator
 
@@ -98,12 +98,14 @@ grader_manager = RewardCalculatorManager()
 from .judge_with_gt import LlmAsJudgeRewardCalculatorWithGT
 from .reward import LlmAsJudgeRewardCalculator
 from .binary_judge import LlmAsJudgeBinaryRewardCalculator
+from .binary_judge_gt import LlmAsJudgeBinaryRewardCalculatorWithGT
 from .env_grader import EnvGrader
 
 __all__=[
     "LlmAsJudgeRewardCalculatorWithGT",
     "LlmAsJudgeRewardCalculator",
     "LlmAsJudgeBinaryRewardCalculator",
+    "LlmAsJudgeBinaryRewardCalculatorWithGT",
     "EnvGrader",
     "grader_manager"
 ]

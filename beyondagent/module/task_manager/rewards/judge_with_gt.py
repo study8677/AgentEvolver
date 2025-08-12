@@ -2,6 +2,7 @@ from typing import Optional, cast
 from beyondagent.client.env_client import EnvClient
 from beyondagent.client.llm_client import DashScopeClient
 from beyondagent.module.agent_flow.reward_calculator import RewardCalculator
+from beyondagent.schema.task import Task
 from beyondagent.schema.trajectory import Trajectory
 
 from . import grader_manager
@@ -68,7 +69,8 @@ class LlmAsJudgeRewardCalculatorWithGT(RewardCalculator):
     
     TODO: This is a temperary solution for synthetic data.
     """
-    def __init__(self, model_name='qwq-plus'):
+    def __init__(self, task:Task, model_name='qwq-plus'):
+        super().__init__(task)
         self._client=DashScopeClient(model_name=model_name)
     
     def pack_message(self, trajectory: Trajectory):
@@ -87,15 +89,12 @@ class LlmAsJudgeRewardCalculatorWithGT(RewardCalculator):
             trajectory_text += f"{role.upper()}: {content}\n\n"
         
         messages.append({"role": "user", "content": trajectory_text})
-        user_prompt=USER_PROMPT.replace("{{reference_solution}}",self._gt)
+        user_prompt=USER_PROMPT.replace("{{reference_solution}}",self.task.ground_truth or "[No solution provided, please judge the task by yourself]")
         messages.append({"role":"user","content":user_prompt})
         return messages
     
-    def set_gt(self,gt:Optional[str]):
-        assert gt is not None, "at least at present it cannot be none"
-        self._gt=gt if gt is not None else "[No solution provided, please judge the task by yourself]"
     
-    def calculate_reward(self, trajectory: Trajectory, env: EnvClient) -> float:
+    def calculate_reward(self, trajectory: Trajectory, env: EnvClient, instance_id: str) -> float:
         x=cast(float,self._calculate_reward(trajectory,env,eject_llm_output=False))
         return x
         
