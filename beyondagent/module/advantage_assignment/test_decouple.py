@@ -4,8 +4,8 @@ from dataclasses import dataclass
 
 @dataclass
 class PRMHyper:
-    good_step_reward: float = 0.5
-    bad_step_reward: float = -0.5
+    good_step_reward: float = 0.2
+    bad_step_reward: float = -0.2
     eps: float = 1e-8
 
 def compute_step_prm_rewards(
@@ -185,7 +185,7 @@ def compute_step_advantages_method4(
     
     # 3. 组合标准化奖励
     combined_rewards = combine_normalized_rewards(norm_prm, norm_orm, alpha, orm_distribution)
-    
+
     # 4. GRPO后缀和
     advantages = compute_grpo_advantages_from_combined(combined_rewards)
     
@@ -211,10 +211,10 @@ def check_order_per_sample(flags: List[bool], rewards: List[float], advantages: 
             print(f"    ⚠️  轨迹中GOOD步骤advantage不应低于BAD步骤")
         
 def test_method4():
-    print("方案4测试：分离标准化PRM+ORM")
+    # print("方案4测试：分离标准化PRM+ORM")
     
     hyper = PRMHyper()
-    alpha = 1.0  # PRM权重
+    alpha = 0.2 # PRM权重
     
     # 测试1: 成功轨迹批次，多数good步骤
     print("\n【测试1: 成功轨迹批次，多数GOOD步骤】")

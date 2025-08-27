@@ -20,6 +20,8 @@ class PRMHyper:
     do_batch_zscore: bool = True          # 是否做组内 z-score（按 step 级，allocation_c/decouple 会用到）
     traj_equal_zscore: bool = True        # True=每条轨迹等权；False=把所有 step 拉平成一个大样本
     fix_base: float = 0.2                 # fix 方案的基础幅度（good=+base, bad=-base）
+    alpha: float = 1.0                    # PRM权重平衡系数
+    orm_distribution: str = "last_step"   # ORM分配方式："last_step" 或 "all_steps"
 
 def _ensure_tensor(x, device, dtype=None):
     if torch.is_tensor(x):
@@ -218,36 +220,93 @@ def _build_allocation_c(
     return out
 
 def _build_decouple(
-    orms_sign: torch.Tensor,
+    orm_full_scores: torch.Tensor,  # 完整的ORM分数
     step_flags: List[List[bool]],
     step_ids: torch.Tensor,
     group_ids: torch.Tensor,
-    hyper: PRMHyper,
+    hyper: PRMHyper
 ) -> List[List[float]]:
-    """方案4：decouple —— PRM 和 ORM 解耦；不强制 ∑=±1。
-    - PRM：只用 flags 造“形状”（good=+1，bad=−1），与 ORM 无关；
-    - 组内 z-score（step级）；
-    - 只用 ORM_sign 决定整体方向：r_step = sign(ORM) * zscored_shape_step
+    """方案4：decouple —— PRM 和 ORM 分别标准化后组合；不强制 ∑=±1。
+    - PRM：基于 flags 构造基础奖励，做组内 z-score 标准化
+    - ORM：使用完整的 ORM 分数，做组内 z-score 标准化
+    - 组合：alpha * normalized_prm + normalized_orm（按 orm_distribution 方式分配）
     """
     B = step_ids.size(0)
-    # 1) 形状（与 ORM 无关）
-    shape_raw: List[List[float]] = []
+    device = step_ids.device
+    alpha = hyper.alpha
+    orm_distribution = hyper.orm_distribution
+    
+    # ---- 1. 构造基础 PRM 奖励（与 ORM 无关）----
+    prm_rewards_raw: List[List[float]] = []
     for i in range(B):
         K = _num_steps_from_step_ids(step_ids[i])
         if K == 0:
-            shape_raw.append([]); continue
+            prm_rewards_raw.append([])
+            continue
         flags = _align_flags(step_flags[i] if i < len(step_flags) else [], K, is_success=True)
-        shape_raw.append([1.0 if f else -1.0 for f in flags])
-    # 2) group z-score（仅对“形状”做）
-    shape_std = _group_zscore_on_steps(shape_raw, group_ids, hyper)
-    # 3) 只乘以 orms_sign 的方向，不做投影到 ±1
-    out: List[List[float]] = []
+        # 使用固定的 good/bad 值，不依赖 ORM
+        prm_rewards = [hyper.fix_base if f else -hyper.fix_base for f in flags]
+        prm_rewards_raw.append(prm_rewards)
+    
+    # ---- 2. 对 PRM 奖励做组内 z-score 标准化 ----
+    prm_rewards_std = _group_zscore_on_steps(prm_rewards_raw, group_ids, hyper)
+    
+    # ---- 3. 对完整的 ORM 分数做组内标准化 ----
+    orm_scores = orm_full_scores.cpu().tolist()
+    
+    # 对 ORM 分数做组内标准化
+    gids = group_ids.view(-1).tolist()
+    g2idx: Dict[int, List[int]] = {}
+    for i, g in enumerate(gids):
+        g2idx.setdefault(int(g), []).append(i)
+    
+    orm_scores_std = [0.0] * B
+    for _, idxs in g2idx.items():
+        group_orms = [orm_scores[i] for i in idxs]
+        if len(group_orms) == 0:
+            continue
+        orm_tensor = torch.tensor(group_orms, dtype=torch.float32)
+        orm_mean = orm_tensor.mean()
+        orm_std = orm_tensor.std(unbiased=False)
+        
+        if orm_std <= hyper.eps:
+            # 标准差太小，只减均值
+            for i in idxs:
+                orm_scores_std[i] = float(orm_scores[i] - orm_mean.item())
+        else:
+            # 标准 z-score
+            for i in idxs:
+                orm_scores_std[i] = float((orm_scores[i] - orm_mean.item()) / (orm_std.item() + 1e-12))
+    
+    # ---- 4. 组合标准化的 PRM 和 ORM ----
+    combined_rewards: List[List[float]] = []
     for i in range(B):
-        if not shape_std[i]:
-            out.append([]); continue
-        sgn = 1.0 if float(orms_sign[i].item()) > 0 else -1.0
-        out.append([float(sgn * x) for x in shape_std[i]])
-    return out
+        if not prm_rewards_std[i]:
+            combined_rewards.append([])
+            continue
+        
+        prm_std = prm_rewards_std[i]
+        orm_std = orm_scores_std[i]
+        
+        combined = []
+        for j, prm_reward in enumerate(prm_std):
+            if orm_distribution == "last_step":
+                # ORM 只加在最后一步
+                if j == len(prm_std) - 1:
+                    combined_reward = alpha * prm_reward + orm_std
+                else:
+                    combined_reward = alpha * prm_reward
+            elif orm_distribution == "all_steps":
+                # ORM 每步都加
+                combined_reward = alpha * prm_reward + orm_std
+            else:
+                raise ValueError(f"Unknown orm_distribution: {orm_distribution}")
+            
+            combined.append(float(combined_reward))
+        
+        combined_rewards.append(combined)
+    
+    return combined_rewards
 
 # =========================
 # Step → Token broadcast + suffix-sum
@@ -324,19 +383,20 @@ def compute_prm_grpo_advantages(
         raise KeyError("token-level rewards not found in batch (tried keys: token_level_rewards / response_token_level_rewards / token_rewards)")
 
     # ---- ORM_sign = ±1（保持 sum>0 → +1；sum<=0 → -1）----
+    # TODO: ORM做normalization
     orm_sum = token_level_rewards.sum(dim=1)   # (B,)
-    orms_sign = torch.where(orm_sum > 0, torch.ones_like(orm_sum), -torch.ones_like(orm_sum)).to(dtype=torch.float32)
+    orms_score = torch.where(orm_sum > 0, torch.ones_like(orm_sum), -torch.ones_like(orm_sum)).to(dtype=torch.float32)
 
     # ---- Build step rewards by scheme ----
     scheme = (scheme or "allocation_c").lower()
     if scheme == "fix":
-        step_rewards = _build_fix(orms_sign, step_flags, step_ids, hyper)
+        step_rewards = _build_fix(orms_score, step_flags, step_ids, hyper)
     elif scheme == "allocation":
-        step_rewards = _build_allocation(orms_sign, step_flags, step_ids, hyper)
+        step_rewards = _build_allocation(orms_score, step_flags, step_ids, hyper)
     elif scheme == "allocation_c":
-        step_rewards = _build_allocation_c(orms_sign, step_flags, step_ids, group_ids, hyper)
+        step_rewards = _build_allocation_c(orms_score, step_flags, step_ids, group_ids, hyper)
     elif scheme == "decouple":
-        step_rewards = _build_decouple(orms_sign, step_flags, step_ids, group_ids, hyper)
+        step_rewards = _build_decouple(orms_score, step_flags, step_ids, group_ids, hyper,)
     else:
         raise ValueError(f"Unknown PRM scheme: {scheme} (expected one of: fix | allocation | allocation_c | decouple)")
 

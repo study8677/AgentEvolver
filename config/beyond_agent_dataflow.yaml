@@ -80,6 +80,8 @@ semantic_advantage:
     do_batch_zscore: true
     traj_equal_zscore: true
     fix_base: 0.2
+    alpha: 0.2
+    orm_distribution: last_step
 
 
 trainer:
