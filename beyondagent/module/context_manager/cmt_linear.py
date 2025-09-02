@@ -1,5 +1,7 @@
 import copy
 import uuid
+import json
+import re
 import torch
 from typing import List, Union
 from beyondagent.schema.trajectory import Sample, Reward
@@ -45,9 +47,12 @@ class Linear_CMT(Trajectory, ContextManagerBase):
         self.is_terminated = False
         self.reward: Union[Reward, None] = None
         self.context_time_cost = 0
-        self.tag = ""
+        self.tag: str = ""
+        self.task_id: str = ""
+        self.task_train_exp_mode: str = ""
         self.current_batch_success_rate:float = -1.0
         self.llm_output_mistakes = {}
+        self.experiences = []
 
         log_prob_max_token_len_per_gpu: int = self.config.actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu
         ref_log_prob_max_token_len_per_gpu: int = self.config.actor_rollout_ref.ref.log_prob_max_token_len_per_gpu
@@ -130,6 +135,8 @@ class Linear_CMT(Trajectory, ContextManagerBase):
     def steps(self):
         return self.prepare_previous_context(mod='future')
 
+    def json(self):
+        return json.dumps(self.prepare_previous_context(mod='future'), ensure_ascii=False, indent=2)
 
     def prepare_next_llm_context(self):
         return self.prepare_previous_context(mod='future')
@@ -409,6 +416,9 @@ class Linear_CMT(Trajectory, ContextManagerBase):
             if v < threshold: return -1.0
         return 0.0
 
+
+
+
     def tokenize_steps(self, ext_steps: List[ExtendedMessage], debug=False) -> dict:
         """
         Create an Experience object from the current conversation context.
@@ -425,6 +435,32 @@ class Linear_CMT(Trajectory, ContextManagerBase):
         """
         from verl.utils.model import compute_position_id_with_mask
         ext_steps = self.remove_last_non_llm_msg(ext_steps)
+
+        # ANNI experience extraction and discard
+        def extract_and_discard_experience(input_string, experience_template):  # <EXP>{}</EXP>
+            pattern = re.escape(experience_template).replace(r'\{\}', '(.*?)')
+            match = re.search(pattern, input_string)
+            if match:
+                experience = match.group(1)
+                prompt = re.sub(pattern, '', input_string)
+                return experience, prompt
+            else:
+                return "", input_string
+
+        # ANNI experience extraction and discard
+        if self.task_train_exp_mode == "discard":
+            self.experience_template = self.config.hybrid_experience_training.experience_template
+            for i, ext_msg in enumerate(ext_steps):
+                experience, new_content = extract_and_discard_experience(ext_msg.content_for_future, self.experience_template)
+                self.experiences += [experience]
+                if experience:
+                    ext_steps[i] = ExtendedMessage(
+                        author=ext_msg.author,
+                        role=ext_msg.role,
+                        content=new_content,
+                        token_generator=ext_msg.token_generator,
+                        tokenizer=self.tokenizer,
+                    )
 
         # mapping
         input_ids = []

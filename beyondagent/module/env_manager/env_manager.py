@@ -7,6 +7,7 @@ import numpy as np
 import torch
 import random
 import re
+import os
 from loguru import logger
 from omegaconf import DictConfig
 from tensordict import TensorDict
@@ -23,11 +24,22 @@ from beyondagent.module.env_manager.env_worker import EnvWorker
 from beyondagent.module.trainer.ba_async_llm_server_manager import BaAsyncLLMServerManager
 from beyondagent.schema.task import Task
 from beyondagent.schema.trajectory import Trajectory, Sample
+from beast_logger import register_logger
+
+def init_logger(experiment_name):
+    """Initialize the logger with the given configuration."""
+    if 'BEST_LOGGER_INIT' in os.environ: return # prevent re-initialization in ray environment
+    os.environ['BEST_LOGGER_INIT'] = '1'
+    from datetime import datetime
+    final_log_path = os.path.join( "./logs", datetime.now().strftime("%Y_%m_%d_%H_%M") + '_' + experiment_name )
+    non_console_mods = ["appworld_io", "rollout", "token_clip", "bad_case", "env_clip"]
+    register_logger(mods=["evaluation", "exception"], non_console_mods=non_console_mods, auto_clean_mods=[], base_log_path=final_log_path, debug=False)
 
 
 class ParallelEnvManager(object):
     def __init__(self, config: DictConfig, async_rollout_manager: BaAsyncLLMServerManager, max_parallel: int,
                  max_llm_retries: int = 3, **kwargs):
+        init_logger(experiment_name=config.trainer.experiment_name)
         super().__init__(**kwargs)
 
         self.config: DictConfig = config
@@ -42,6 +54,10 @@ class ParallelEnvManager(object):
         self.rollout_config = config.actor_rollout_ref.rollout
 
         self.experience_template = config.hybrid_experience_training.experience_template
+        self.llm_mode = "local" # use fsdp worker ("local") or use foreign server ("remote")
+        self.current_token = 0
+        self.current_token_count_time = time.time()
+
 
     def get_llm_chat_fn(self, sampling_params: dict = None) -> callable:
         def llm_chat(messages: List[Dict[str, str]],
@@ -57,11 +73,12 @@ class ParallelEnvManager(object):
                 updated_sampling_params.update(sampling_params)
             if custom_sampling_params:
                 updated_sampling_params.update(custom_sampling_params)
+            updated_sampling_params.update({"logprobs": 1, "return_tokens_as_token_ids": True})
 
             # output_messages = []
             input_messages = copy.deepcopy(messages)
             weighted_addresses = self.async_rollout_manager.chat_scheduler.weighted_addresses
-            logger.info(f"weighted_addresses={weighted_addresses}")
+            # logger.info(f"weighted_addresses={weighted_addresses}")
             for i in range(self.max_llm_retries):
                 try:
                     self.async_rollout_manager.submit_chat_completions(messages=input_messages,
@@ -75,10 +92,74 @@ class ParallelEnvManager(object):
 
             return input_messages[-1]
 
-        return llm_chat
+        def llm_chat_remote(messages: List[Dict[str, str]],
+                     custom_sampling_params: dict = None,
+                     request_id: str = None) -> dict:
+            """
+            input messages: [{"role": "system", "value": "..."}, {"role": "user", "value": "..."}]
+            output messages: [{"role": "assistant", "value": "..."}]
+            """
+            updated_sampling_params = {}
+            if sampling_params:
+                updated_sampling_params.update(sampling_params)
+            if custom_sampling_params:
+                updated_sampling_params.update(custom_sampling_params)
+            updated_sampling_params.update({"logprobs": 1, "return_tokens_as_token_ids": True})
+            input_messages = copy.deepcopy(messages)
+            for i in range(self.max_llm_retries):
+                try:
+                    output_message = self.async_rollout_manager.submit_chat_completions(messages=input_messages,
+                                                                       sampling_params=updated_sampling_params,
+                                                                       request_id=request_id)
+                    break
+                except Exception as e:
+                    logger.exception(f"rollout_server.{i} error: {e.args}")
+                    time.sleep(i + 1)
+            return output_message[-1]
+
+        if self.llm_mode == "remote":
+            return llm_chat_remote
+        else:
+            return llm_chat
+
+    def step_status_printer(self, tmux):
+        # 直方数据，tmux 0~10 数量 10~20 数量 20~30 数量 30~40 数量 ……
+        step_counter = {}
+
+        current_token = sum(tmux['token'])
+        current_time = time.time()
+        delta_token = current_token - self.current_token
+        delta_time = current_time - self.current_token_count_time
+        self.current_token = current_token
+        self.current_token_count_time = current_time
+        token_gen_per_sec_str = f"{delta_token/delta_time:.2f} tokens/s" if delta_time > 0 else "N/A"
+
+
+        for step in tmux['step']:
+            if step == -1:
+                step_counter[(-1, 'terminated')] = step_counter.get((-1, 'terminated'), 0) + 1
+                continue
+            else:
+                start = (step // 5) * 5
+                end = start + 5
+                step_counter[(start, end)] = step_counter.get((start, end), 0) + 1
+
+        # sort by start value (small to large)
+        step_counter = dict(sorted(step_counter.items(), key=lambda x: x[0][0]))
+
+        print_buf = []
+        for (start, end), count in step_counter.items():
+            if start != -1:
+                print_buf += [f"[{start}-{end}]:{count} threads"]
+        for (start, end), count in step_counter.items():
+            if start == -1:
+                print_buf += [f"[finished]:{count} threads"]
+        print(f"Rollout progress ({token_gen_per_sec_str}): " + "  //  ".join(print_buf))
+
+
 
     def rollout_env_worker(self, task: Task, data_id: str, rollout_id: str, mode: Literal["sample", "validate"],
-                           thread_index: int, add_exp: bool, task_train_exp_mode: str, **kwargs) -> Trajectory: # add add_exp & task_train_exp_mode by ANNI
+                           thread_index: int, add_exp: bool, task_train_exp_mode: str, tmux: dict, stop:list, **kwargs) -> Trajectory: # add add_exp & task_train_exp_mode by ANNI
         """
         Process a single prompt in a thread-safe way.
         """
@@ -98,21 +179,19 @@ class ParallelEnvManager(object):
         llm_chat_fn = self.get_llm_chat_fn(sampling_params)
         agent_flow: BaseAgentFlow = AgentFlow(
             reward_calculator=LlmAsJudgeRewardCalculator() if task.evaluator=='synthetic' else None, # TODO: better calculator injection
-            llm_chat_fn=llm_chat_fn, 
-            tokenizer=self.tokenizer, 
+            llm_chat_fn=llm_chat_fn,
+            tokenizer=self.tokenizer,
             config=self.config,
             **kwargs
         )
 
-        # FIXME pass env_type & task_id
-        env_worker = EnvWorker(task=task, thread_index=thread_index,
-                               config=self.config)
-        trajectory: Trajectory = env_worker.execute(data_id=data_id, rollout_id=rollout_id, add_exp=add_exp, task_train_exp_mode=task_train_exp_mode, agent_flow=agent_flow) # add add_exp & task_train_exp_mode by ANNI
+        env_worker = EnvWorker(task=task, thread_index=thread_index, config=self.config, tokenizer=self.tokenizer)
+        trajectory: Trajectory = env_worker.execute(data_id=data_id, rollout_id=rollout_id, add_exp=add_exp, task_train_exp_mode=task_train_exp_mode, agent_flow=agent_flow, tmux=tmux, stop=stop) # add add_exp & task_train_exp_mode by ANNI
 
         return trajectory
 
-    def rollout(self, tasks: List[Task], mode: Literal["sample", "validate"], epoch: str) -> List[Trajectory]:
-        trajectory_list: List[Trajectory] = []
+    def rollout(self, tasks: List[Task], mode: Literal["sample", "validate"], epoch: str):
+        traj_cmt_array = []
         #############
         # ANNI 0814
         if mode == "validate":
@@ -131,6 +210,11 @@ class ParallelEnvManager(object):
             task.metadata.get("task_train_exp_mode", "keep")
             for task in tasks
         ]   # len(tasks)个: task_train_exp_mode是query/task-level的
+        tmux = {
+            'step': [0 for _ in range(len(tasks) * rollout_n)],
+            'token': [0 for _ in range(len(tasks) * rollout_n)],
+        }
+        stop = [False for _ in range(len(tasks) * rollout_n)]
 
         with ThreadPoolExecutor(max_workers=self.max_parallel) as executor:
             futures = []
@@ -139,32 +223,37 @@ class ParallelEnvManager(object):
                     thread_index = data_id * rollout_n + rollout_id
                     add_exp = add_exp_choices[rollout_id]
                     future = executor.submit(self.rollout_env_worker, task=task, data_id=str(data_id),
-                                            rollout_id=str(rollout_id), mode=mode, thread_index=thread_index, add_exp=add_exp, task_train_exp_mode=task_train_exp_mode)  # add add_exp & task_train_exp_mode by ANNI
+                        rollout_id=str(rollout_id),
+                        mode=mode,
+                        thread_index=thread_index,
+                        add_exp=add_exp,
+                        task_train_exp_mode=task_train_exp_mode,
+                        tmux=tmux,
+                        stop=stop,
+                    )
                     futures.append(future)
-        #############
+
+            while any(future.running() for future in futures):
+                self.step_status_printer(tmux)
+                time.sleep(10)
+
             for future in tqdm(futures, desc=f"epoch{epoch}.collect_rollout"):
                 # do not fail silently
                 result = future.result()
-                trajectory_list.append(result)
+                traj_cmt_array.append(result)
 
-            trajectory_list = sorted(trajectory_list, key=lambda x: (int(x.data_id), x.rollout_id))
-            return trajectory_list
+            task_success_rate = np.mean([cmt.reward.success_rate for cmt in traj_cmt_array])
+            for cmt in traj_cmt_array:
+                cmt.current_batch_success_rate = np.mean(task_success_rate)
 
-    # TODO: define an extra class for trajectory-dataproto converting.
-    def to_dataproto(self, trajectories: List[Trajectory]) -> DataProto:
-        """Convert trajectories to DataProto"""
-        # Step 1: Convert trajectories to samples: tokenizing
-        samples = self.trajectories_to_samples(trajectories)
+            return traj_cmt_array
 
-        # Step 2: Convert samples to DataProto: padding
-        dataproto = self.samples_to_dataproto(samples)
-        
-        return dataproto
-    
+
+
     #############
     # ANNI 0825
     @staticmethod
-    def extract_and_discard_experience(input_string, experience_template):
+    def extract_and_discard_experience(input_string, experience_template):  # <EXP>{}</EXP>
         pattern = re.escape(experience_template).replace(r'\{\}', '(.*?)')
         match = re.search(pattern, input_string)
         if match:
@@ -173,128 +262,52 @@ class ParallelEnvManager(object):
             return experience, prompt
         else:
             return "", input_string
-    #############
 
-    def trajectories_to_samples(self, trajectories: List[Trajectory]) -> List[Sample]:
+    # TODO: define an extra class for trajectory-dataproto converting.
+    def to_dataproto(self, cmt_array) -> DataProto:
+        """Convert trajectories to DataProto"""
+        # Step 1: Convert trajectories to samples: tokenizing
+        samples = self.trajectories_to_samples(cmt_array)
+
+        # Step 2: Convert samples to DataProto: padding
+        dataproto = self.samples_to_dataproto(samples)
+
+        return dataproto
+
+
+    def get_extra(self, cmt):
+        extras = {
+            "add_exp": cmt.metadata.get("add_exp", None),
+            "task_train_expmode": cmt.metadata.get("task_train_exp_mode", None),
+            "experience": cmt.metadata.get("experience", [])
+        }
+        return extras
+
+
+    def trajectories_to_samples(self, cmt_array: List) -> List[Sample]:
         """Convert trajectories to samples"""
-        samples = []
-        for trajectory in trajectories:
-            messages = trajectory.steps
-            if len(messages) == 0:
-                # Fixme: empty trajectory yunpeng
-                sample = Sample(
-                    data_id=trajectory.data_id,
-                    rollout_id=trajectory.rollout_id,
-                    messages=trajectory.steps,
-                    reward_scores=trajectory.reward.model_dump()
-                )
-                sample.discard()
-                samples.append(sample)
-                continue
-                # messages = [{"role": "user", "content": ""}, {"role": "assistant", "content": ""}]
-            
-            #############
-            # ANNI 0825
-            train_sample_exp_mode = trajectory.metadata.get("task_train_exp_mode", "keep")  # "keep" or "discard"
-            # print(train_sample_exp_mode)
+        # step 1: convertion
+        sample_arr_final = []
+        for cmt in cmt_array:
+            extras = self.get_extra(cmt)
+            sample_arr = cmt.group_tokenize()
+            for sample in sample_arr:
+                sample.extras = extras
+            sample_arr_final += sample_arr
 
-            if train_sample_exp_mode == "keep":
-                experiences = [self.extract_and_discard_experience(msg["content"], self.experience_template)[0] for msg in messages]
-            elif train_sample_exp_mode == "discard":
-                experiences, prompts = zip(*[self.extract_and_discard_experience(msg["content"], self.experience_template) for msg in messages])
-                for msg, prompt in zip(messages, prompts):
-                    msg["content"] = prompt
-            #############
+        # Step 2: Calculate how many samples need to be removed
+        world_size = self.config.trainer.n_gpus_per_node * self.config.trainer.nnodes
+        remainder = len(sample_arr_final) % world_size
+        if remainder != 0:
+            import random
+            remove_indices = random.sample(range(len(sample_arr_final)), remainder)
+            # Sort in reverse order to avoid index shifting during removal
+            remove_indices.sort(reverse=True)
+            for idx in remove_indices:
+                sample_arr_final.pop(idx)
 
-            full_text = self.tokenizer.apply_chat_template(messages, tokenize=False)
-            outputs = self.tokenizer(full_text, return_tensors="pt", padding=False)
-            input_ids = outputs["input_ids"][0].tolist()  # 移除batch维度
-            attention_mask = outputs["attention_mask"][0].tolist()
-            
-            assert len(messages)>=2 and messages[0]["role"] == "system" and messages[1]["role"] == "user", "#message must >=2 and consists of system prompt + query prompt"
-            prompt_text = self.tokenizer.apply_chat_template(messages[:2], tokenize=False, add_generation_prompt=True)
-            prompt_outputs = self.tokenizer(prompt_text, return_tensors="pt", padding=False)
-            prompt_ids = prompt_outputs["input_ids"][0].tolist()
-            prompt_attention_mask = prompt_outputs["attention_mask"][0].tolist()
-
-            response_ids = input_ids[len(prompt_ids):]
-            response_attention_mask = attention_mask[len(prompt_attention_mask):]
-
-            position_ids = compute_position_id_with_mask(torch.tensor(attention_mask)).tolist()
-            prompt_position_ids = position_ids[:len(prompt_ids)]
-            response_position_ids = position_ids[len(prompt_ids):]
-            
-            # 生成loss mask (仅在response部分计算loss，但需要在response部分mask env的输出)
-            prompt_loss_mask = [0] * len(prompt_ids)
-            response_loss_mask = [1] * len(response_ids)
-
-            response_token_ids_idxs = []
-            human_token_ids_idxs = []
-
-            response_ids_np = np.array(response_ids)
-
-            self.instruction_template_ids = self.tokenizer.encode("<|im_start|>user\n")
-            self.response_template_ids = self.tokenizer.encode("<|im_start|>assistant\n")
-
-            for assistant_idx in np.where(response_ids_np == self.response_template_ids[0])[0]:
-                if self.response_template_ids == response_ids_np[assistant_idx: assistant_idx + len(
-                        self.response_template_ids)].tolist():
-                    response_token_ids_idxs.append(assistant_idx + len(self.response_template_ids))
-
-            for human_idx in np.where(response_ids_np == self.instruction_template_ids[0])[0]:
-                if self.instruction_template_ids == response_ids_np[human_idx: human_idx + len(self.instruction_template_ids)].tolist():
-                    human_token_ids_idxs.append(human_idx)
-
-            if (
-                len(human_token_ids_idxs) > 0
-                and len(response_token_ids_idxs) > 0
-                and human_token_ids_idxs[0] > response_token_ids_idxs[0]
-            ):
-                human_token_ids_idxs = [0] + human_token_ids_idxs
-
-            for idx, (start, end) in enumerate(zip(human_token_ids_idxs, response_token_ids_idxs)):
-                response_loss_mask[start:end] = [0] * (end-start)
-
-            if len(response_token_ids_idxs) < len(human_token_ids_idxs):
-                response_loss_mask[human_token_ids_idxs[-1]:] = [0] * (len(response_loss_mask)-human_token_ids_idxs[-1])
-
-            loss_mask = prompt_loss_mask + response_loss_mask
-
-            sample = Sample(
-                data_id=trajectory.data_id,
-                rollout_id=trajectory.rollout_id,
-                messages=trajectory.steps,
-                input_ids=input_ids,
-                prompt_ids=prompt_ids,
-                response_ids=response_ids,
-                attention_mask=attention_mask,
-                prompt_attention_mask=prompt_attention_mask,
-                response_attention_mask=response_attention_mask,
-                loss_mask=loss_mask,
-                prompt_loss_mask=prompt_loss_mask,
-                response_loss_mask=response_loss_mask,
-                position_ids=position_ids,
-                prompt_position_ids=prompt_position_ids,
-                response_position_ids=response_position_ids,
-                reward_scores=trajectory.reward.model_dump(),
-                max_prompt_len=self.config.data.max_prompt_length,
-                max_response_len=self.config.data.max_response_length,
-                extras={
-                    "add_exp": trajectory.metadata.get("add_exp", None),
-                    # Flag for experience incorporation
-
-                    "task_train_expmode": trajectory.metadata.get("task_train_exp_mode", None), 
-                    # Mode for handling experience during trajectory-to-sample conversion:
-                    # Specifies whether to retain or discard experience data
-                    
-                    "experience": experiences   
-                    # List of experience values associated with the trajectory
-                },
-            )
-            sample.truncate_output_ids()
-            samples.append(sample)
-        
-        return samples
+        # random remove some samples, so that the number of samples is divisible by 8
+        return sample_arr_final
 
     def samples_to_dataproto(self, samples: list[Sample]) -> DataProto:
         # Initialize lists to store batched data
@@ -302,11 +315,12 @@ class ParallelEnvManager(object):
         prompt_attention_mask, response_attention_mask = [], []
         prompt_position_ids, response_position_ids = [], []
         prompt_loss_mask, response_loss_mask = [], []
+        prompt_exp_mask_list, response_exp_mask_list = [], []  # List of binary masks indicating whether to consider off_clip_high for each sample in the batch
         messages = []
         reward_scores = []
+        task_ids = []
         extras = [] # List of dictionaries containing supplementary data for each trajectory, including "add_exp", "task_train_expmode", "experience"
-        exp_mask_list = []  # List of binary masks indicating whether to consider off_clip_high for each sample in the batch
-        
+
         for sample in samples:
             # Validate that all fields have the same length
             assert len(sample.input_ids) == len(sample.attention_mask) == len(sample.position_ids) == len(
@@ -314,23 +328,18 @@ class ParallelEnvManager(object):
                                 f"{len(sample.input_ids)=}, {len(sample.attention_mask)=}, " \
                                 f"{len(sample.position_ids)=}, {len(sample.loss_mask)=}"
 
+            task_ids.append(sample.task_id)
             # Discard samples with prompt length exceeding limit
             if len(sample.prompt_ids) > self.config.data.max_prompt_length:
-                logger.warning(
-                    f"Sample {sample.request_id} has prompt_ids length {len(sample.prompt_ids)} "
-                    f"greater than max_prompt_length {self.config.data.max_prompt_length}, discarding."
-                )
-                sample.discard()
-                continue
+                raise RuntimeError(f"Sample has prompt_ids length {len(sample.prompt_ids)} ")
 
             # Warn if response is longer than expected (but still include it)
             if len(sample.response_ids) > self.config.data.max_response_length:
-                logger.warning(
-                    f"Sample {sample.request_id} has response_ids length {len(sample.response_ids)} "
-                    f"greater than max_response_length {self.config.data.max_response_length}."
-                )
+                raise RuntimeError(f"Sample has prompt_ids length {len(sample.prompt_ids)} ")
 
             # Append tensors to respective lists
+            assert len(sample.prompt_ids) != 0
+            assert len(sample.response_ids) != 0
             prompt_ids.append(torch.tensor(sample.prompt_ids, dtype=torch.int))
             response_ids.append(torch.tensor(sample.response_ids, dtype=torch.int))
 
@@ -349,51 +358,52 @@ class ParallelEnvManager(object):
 
             # Create experience mask: 1 if off_clip_high conditions met (add_exp=True, task_train_expmode="discard"), else 0
             if sample.extras.get("add_exp", False) and sample.extras.get("task_train_expmode", None)=="discard":
-                exp_mask_list.append(torch.ones(len(sample.loss_mask), dtype=torch.int))
+                prompt_exp_mask_list.append(torch.ones(len(sample.prompt_loss_mask), dtype=torch.int))
+                response_exp_mask_list.append(torch.ones(len(sample.response_loss_mask), dtype=torch.int))
             else:
-                exp_mask_list.append(torch.zeros(len(sample.loss_mask), dtype=torch.int))
+                prompt_exp_mask_list.append(torch.zeros(len(sample.prompt_loss_mask), dtype=torch.int))
+                response_exp_mask_list.append(torch.zeros(len(sample.response_loss_mask), dtype=torch.int))
 
 
+
+        max_prompt_length_this_batch = max([p.shape[-1] for p in prompt_ids])
+        assert max_prompt_length_this_batch <= self.config.data.max_prompt_length
+        max_response_length_this_batch = max([p.shape[-1] for p in response_ids])
+        assert max_response_length_this_batch <= self.config.data.max_response_length
 
         # Batch and pad sequences
-        prompt_ids = pad_sequence(prompt_ids, batch_first=True, padding_value=self.pad_token_id, padding_side="left")
-        prompt_ids = pad_sequence_to_length(prompt_ids, self.config.data.max_prompt_length, self.pad_token_id, left_pad=True)
-
-        response_ids = pad_sequence(response_ids, batch_first=True, padding_value=self.pad_token_id)
-        response_ids = pad_sequence_to_length(response_ids, self.config.data.max_response_length, self.pad_token_id)
-
+        prompt_ids =            pad_sequence(prompt_ids, batch_first=True, padding_value=self.pad_token_id, padding_side="left")
         prompt_attention_mask = pad_sequence(prompt_attention_mask, batch_first=True, padding_value=0, padding_side="left")
-        prompt_attention_mask = pad_sequence_to_length(prompt_attention_mask, self.config.data.max_prompt_length, 0,
-                                                    left_pad=True)
+        prompt_position_ids =   pad_sequence(prompt_position_ids, batch_first=True, padding_value=0, padding_side="left")
+        prompt_loss_mask =      pad_sequence(prompt_loss_mask, batch_first=True, padding_value=0, padding_side="left")
+        prompt_exp_mask_list =  pad_sequence(prompt_exp_mask_list, batch_first=True, padding_value=0, padding_side="left")
 
+        prompt_ids =            pad_sequence_to_length(prompt_ids, max_prompt_length_this_batch, self.pad_token_id, left_pad=True)
+        prompt_attention_mask = pad_sequence_to_length(prompt_attention_mask, max_prompt_length_this_batch, 0, left_pad=True)
+        prompt_position_ids =   pad_sequence_to_length(prompt_position_ids, max_prompt_length_this_batch, 0, left_pad=True)
+        prompt_loss_mask =      pad_sequence_to_length(prompt_loss_mask, max_prompt_length_this_batch, 0, left_pad=True)
+        prompt_exp_mask_list =  pad_sequence_to_length(prompt_exp_mask_list, max_prompt_length_this_batch, 0, left_pad=True)
+
+        response_ids =            pad_sequence(response_ids, batch_first=True, padding_value=self.pad_token_id)
         response_attention_mask = pad_sequence(response_attention_mask, batch_first=True, padding_value=0)
-        response_attention_mask = pad_sequence_to_length(response_attention_mask, self.config.data.max_response_length, 0)
+        response_loss_mask =      pad_sequence(response_loss_mask, batch_first=True, padding_value=0)
+        response_exp_mask_list =  pad_sequence(response_exp_mask_list, batch_first=True, padding_value=0, padding_side="left")
 
-        prompt_position_ids = pad_sequence(prompt_position_ids, batch_first=True, padding_value=0, padding_side="left")
-        prompt_position_ids = pad_sequence_to_length(prompt_position_ids, self.config.data.max_prompt_length, 0,
-                                                    left_pad=True)
+        response_ids =            pad_sequence_to_length(response_ids, max_response_length_this_batch, self.pad_token_id)
+        response_attention_mask = pad_sequence_to_length(response_attention_mask, max_response_length_this_batch, 0)
+        response_loss_mask =      pad_sequence_to_length(response_loss_mask, max_response_length_this_batch, 0)
+        response_exp_mask_list =  pad_sequence_to_length(response_exp_mask_list, max_prompt_length_this_batch, 0, left_pad=True)
 
-        response_length = response_ids.size(1)
-        delta_position_id = torch.arange(1, response_length + 1, device=response_ids.device).unsqueeze(0).repeat(
-            len(samples), 1)
+        delta_position_id = torch.arange(1, response_ids.size(1) + 1, device=response_ids.device).unsqueeze(0).repeat(len(samples), 1)
         response_position_ids = prompt_position_ids[:, -1:] + delta_position_id
-
-        prompt_loss_mask = pad_sequence(prompt_loss_mask, batch_first=True, padding_value=0, padding_side="left")
-        prompt_loss_mask = pad_sequence_to_length(prompt_loss_mask, self.config.data.max_prompt_length, 0, left_pad=True)
-
-        response_loss_mask = pad_sequence(response_loss_mask, batch_first=True, padding_value=0)
-        response_loss_mask = pad_sequence_to_length(response_loss_mask, self.config.data.max_response_length, 0)
-
-        exp_mask = pad_sequence(exp_mask_list, batch_first=True, padding_value=0)
-        exp_mask = pad_sequence_to_length(exp_mask, self.config.data.max_prompt_length + self.config.data.max_response_length, 0)
 
         # Concatenate prompt and response tensors
         input_ids = torch.cat((prompt_ids, response_ids), dim=-1)
         attention_mask = torch.cat((prompt_attention_mask, response_attention_mask), dim=-1)
         position_ids = torch.cat((prompt_position_ids, response_position_ids), dim=-1)
         loss_mask = torch.cat((prompt_loss_mask, response_loss_mask), dim=-1)
+        exp_mask = torch.cat((prompt_exp_mask_list, response_exp_mask_list), dim=-1)
 
-				# Validate masks have same shape
         assert exp_mask.shape == loss_mask.shape, f"Shape mismatch: {exp_mask.shape} vs {loss_mask.shape}"
 
         # Construct the batch using TensorDict
@@ -410,4 +420,4 @@ class ParallelEnvManager(object):
             batch_size=len(samples),
         )
 
-        return DataProto(batch=batch, non_tensor_batch={"messages": np.array(messages), "reward_scores": np.array(reward_scores), "extras": np.array(extras)})  # add extras by ANNI
+        return DataProto(batch=batch, non_tensor_batch={"task_ids": np.array(task_ids), "messages": np.array(messages), "reward_scores": np.array(reward_scores), "extras": np.array(extras)})
