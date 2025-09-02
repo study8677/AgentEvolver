@@ -4,7 +4,7 @@ from typing import Any
 
 import requests
 from loguru import logger
-from pydantic import BaseModel, Field, PrivateAttr, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, root_validator
 
 from beyondagent.enumeration.http_enum import HttpEnum
 
@@ -24,10 +24,9 @@ class HttpClient(BaseModel):
 
     _client: Any = PrivateAttr()
 
-    @model_validator(mode="after")
-    def init_client(self):
+    def __init__(self, **data):
+        super().__init__(**data)
         self._client = requests.Session() if self.keep_alive else requests
-        return self
 
     def __enter__(self):
         return self

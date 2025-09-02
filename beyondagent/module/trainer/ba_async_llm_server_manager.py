@@ -1,16 +1,21 @@
 import asyncio
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from verl.workers.rollout.async_server import AsyncLLMServerManager
 
 
 class BaAsyncLLMServerManager(AsyncLLMServerManager):
+    
+    def chat(self, messages: list[dict[str, str]], sampling_params: dict[str, Any]) -> str:
+        """todo"""
+        self.submit_chat_completions(messages.copy(), sampling_params)
+        return messages[-1]['content']
 
     def submit_chat_completions(
             self,
             messages: List[Dict[str, str]],
             sampling_params: Dict[str, Any],
-            request_id: str = None,
+            request_id: Optional[str] = None,
     ):
         """Submit a chat completion request to chat scheduler and wait until it is done.
         To submit multiple requests in parallel, please use `generate_sequences` instead.

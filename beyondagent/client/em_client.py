@@ -1,4 +1,3 @@
-import asyncio
 import time
 from typing import List
 
@@ -16,9 +15,9 @@ class EMClient(HttpClient):
     def call_context_generator(self, trajectory: Trajectory, retrieve_top_k: int = 1, workspace_id: str = "default",
                                **kwargs) -> str:
         start_time = time.time()
-        self.url = self.base_url + "/context_generator"
+        self.url = self.base_url + "/retriever"
         json_data = {
-            "trajectory": trajectory.model_dump(),
+            "query": trajectory.query,
             "retrieve_top_k": retrieve_top_k,
             "workspace_id": workspace_id,
             "metadata": kwargs
@@ -30,22 +29,14 @@ class EMClient(HttpClient):
 
         # TODO return raw experience instead of context @jinli
         trajectory.metadata["context_time_cost"] = time.time() - start_time
-        return response["context_msg"]["content"]
-
-    async def async_call_context_generator(self, executor=None, **kwargs):
-        loop = asyncio.get_event_loop()
-
-        def func():
-            return self.call_context_generator(**kwargs)
-
-        return await loop.run_in_executor(executor=executor, func=func)
+        return response["experience_merged"]
 
     def call_summarizer(self, trajectories: List[Trajectory], workspace_id: str = "default", **kwargs):
         start_time = time.time()
 
         self.url = self.base_url + "/summarizer"
         json_data = {
-            "trajectories": [x.model_dump() for x in trajectories],
+            "traj_list": [{"messages": x.steps, "score": x.reward.outcome} for x in trajectories],
             "workspace_id": workspace_id,
             "metadata": kwargs
         }
@@ -54,15 +45,7 @@ class EMClient(HttpClient):
             logger.warning("error call_context_generator")
             return "", time.time() - start_time
 
-        return response["experiences"], time.time() - start_time
-
-    async def async_call_summarizer(self, executor=None, **kwargs):
-        loop = asyncio.get_event_loop()
-
-        def func():
-            return self.call_summarizer(**kwargs)
-
-        return await loop.run_in_executor(executor=executor, func=func)
+        return response["experience_list"], time.time() - start_time
 
 
 def main():
@@ -81,7 +64,7 @@ def main():
         query="What is the capital of France?",
         reward=Reward(outcome=1.0)
     )
-    workspace_id = "w_agent_enhanced"
+    workspace_id = "w_agent_enhanced2"
 
     print(client.call_summarizer(trajectories=[traj], workspace_id=workspace_id))
     print(client.call_context_generator(traj, retrieve_top_k=3, workspace_id=workspace_id))

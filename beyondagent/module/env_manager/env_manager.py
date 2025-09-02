@@ -5,11 +5,14 @@ from typing import Dict, List, Literal
 
 import numpy as np
 import torch
+import random
+import re
 from loguru import logger
 from omegaconf import DictConfig
 from tensordict import TensorDict
 from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
+from beyondagent.module.task_manager.reward import LlmAsJudgeRewardCalculator
 from verl import DataProto
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.torch_functional import (pad_sequence_to_length)
@@ -52,6 +55,8 @@ class ParallelEnvManager(object):
         self.pad_token_id = self.tokenizer.pad_token_id
         self.rollout_config = config.actor_rollout_ref.rollout
 
+        self.experience_template = config.hybrid_experience_training.experience_template
+
     def get_llm_chat_fn(self, sampling_params: dict = None) -> callable:
         def llm_chat(messages: List[Dict[str, str]],
                      custom_sampling_params: dict = None,
@@ -87,7 +92,7 @@ class ParallelEnvManager(object):
         return llm_chat
 
     def rollout_env_worker(self, task: Task, data_id: str, rollout_id: str, mode: Literal["sample", "validate"],
-                           thread_index: int, **kwargs) -> Trajectory:
+                           thread_index: int, add_exp: bool, task_train_exp_mode: str, **kwargs) -> Trajectory: # add add_exp & task_train_exp_mode by ANNI
         """
         Process a single prompt in a thread-safe way.
         """
@@ -105,30 +110,52 @@ class ParallelEnvManager(object):
             sampling_params["top_p"] = self.rollout_config.val_kwargs.top_p
 
         llm_chat_fn = self.get_llm_chat_fn(sampling_params)
-        agent_flow: BaseAgentFlow = AgentFlow(llm_chat_fn=llm_chat_fn, 
-                                              tokenizer=self.tokenizer, 
-                                              config=self.config,
-                                              **kwargs)
+        agent_flow: BaseAgentFlow = AgentFlow(
+            reward_calculator=LlmAsJudgeRewardCalculator() if task.evaluator=='synthetic' else None, # TODO: better calculator injection
+            llm_chat_fn=llm_chat_fn, 
+            tokenizer=self.tokenizer, 
+            config=self.config,
+            **kwargs
+        )
 
         # FIXME pass env_type & task_id
-        env_worker = EnvWorker(env_type=task.env_type, task_id=task.task_id, thread_index=thread_index,
+        env_worker = EnvWorker(task=task, thread_index=thread_index,
                                config=self.config)
-        trajectory: Trajectory = env_worker.execute(data_id=data_id, rollout_id=rollout_id, agent_flow=agent_flow)
+        trajectory: Trajectory = env_worker.execute(data_id=data_id, rollout_id=rollout_id, add_exp=add_exp, task_train_exp_mode=task_train_exp_mode, agent_flow=agent_flow) # add add_exp & task_train_exp_mode by ANNI
 
         return trajectory
 
     def rollout(self, tasks: List[Task], mode: Literal["sample", "validate"], epoch: str) -> List[Trajectory]:
         trajectory_list: List[Trajectory] = []
-        rollout_n = 1 if mode=="validate" else self.rollout_n
+        #############
+        # ANNI 0814
+        if mode == "validate":
+            rollout_n = self.rollout_config.val_kwargs.n
+            exp_mode = self.config.hybrid_experience_training.val_rollout_expmode
+        else:
+            rollout_n = self.rollout_n
+            exp_mode = self.config.hybrid_experience_training.train_rollout_expmode
+        add_exp_choices = {
+            "woexp": [False] * rollout_n,
+            "mixed": sorted([i < round(rollout_n*self.config.hybrid_experience_training.rollout_expratio) for i in range(rollout_n)], key=lambda _: random.random()),
+            "all": [True] * rollout_n
+        }[exp_mode]
+
+        task_train_exp_modes = [
+            task.metadata.get("task_train_exp_mode", "keep")
+            for task in tasks
+        ]   # len(tasks)个: task_train_exp_mode是query/task-level的
+
         with ThreadPoolExecutor(max_workers=self.max_parallel) as executor:
             futures = []
-            for data_id, task in enumerate(tasks):
+            for data_id, (task, task_train_exp_mode) in enumerate(zip(tasks, task_train_exp_modes)):
                 for rollout_id in range(rollout_n):
                     thread_index = data_id * rollout_n + rollout_id
+                    add_exp = add_exp_choices[rollout_id]
                     future = executor.submit(self.rollout_env_worker, task=task, data_id=str(data_id),
-                                             rollout_id=str(rollout_id), mode=mode, thread_index=thread_index)
+                                            rollout_id=str(rollout_id), mode=mode, thread_index=thread_index, add_exp=add_exp, task_train_exp_mode=task_train_exp_mode)  # add add_exp & task_train_exp_mode by ANNI
                     futures.append(future)
-
+        #############
             for future in tqdm(futures, desc=f"epoch{epoch}.collect_rollout"):
                 # do not fail silently
                 result = future.result()
@@ -150,6 +177,20 @@ class ParallelEnvManager(object):
         
         return dataproto
     
+    #############
+    # ANNI 0825
+    @staticmethod
+    def extract_and_discard_experience(input_string, experience_template):
+        pattern = re.escape(experience_template).replace(r'\{\}', '(.*?)')
+        match = re.search(pattern, input_string)
+        if match:
+            experience = match.group(1)
+            prompt = re.sub(pattern, '', input_string)
+            return experience, prompt
+        else:
+            return "", input_string
+    #############
+
     def trajectories_to_samples(self, trajectories: List[Trajectory]) -> List[Sample]:
         """Convert trajectories to samples"""
         samples = []
@@ -167,13 +208,27 @@ class ParallelEnvManager(object):
                 samples.append(sample)
                 continue
                 # messages = [{"role": "user", "content": ""}, {"role": "assistant", "content": ""}]
+            
+            #############
+            # ANNI 0825
+            train_sample_exp_mode = trajectory.metadata.get("task_train_exp_mode", "keep")  # "keep" or "discard"
+            # print(train_sample_exp_mode)
+
+            if train_sample_exp_mode == "keep":
+                experiences = [self.extract_and_discard_experience(msg["content"], self.experience_template)[0] for msg in messages]
+            elif train_sample_exp_mode == "discard":
+                experiences, prompts = zip(*[self.extract_and_discard_experience(msg["content"], self.experience_template) for msg in messages])
+                for msg, prompt in zip(messages, prompts):
+                    msg["content"] = prompt
+            #############
+
             full_text = self.tokenizer.apply_chat_template(messages, tokenize=False)
             outputs = self.tokenizer(full_text, return_tensors="pt", padding=False)
             input_ids = outputs["input_ids"][0].tolist()  # 移除batch维度
             attention_mask = outputs["attention_mask"][0].tolist()
             
-            # 只有第一条时prompt，后面都是response
-            prompt_text = self.tokenizer.apply_chat_template(messages[:1], tokenize=False, add_generation_prompt=True)
+            assert len(messages)>=2 and messages[0]["role"] == "system" and messages[1]["role"] == "user", "#message must >=2 and consists of system prompt + query prompt"
+            prompt_text = self.tokenizer.apply_chat_template(messages[:2], tokenize=False, add_generation_prompt=True)
             prompt_outputs = self.tokenizer(prompt_text, return_tensors="pt", padding=False)
             prompt_ids = prompt_outputs["input_ids"][0].tolist()
             prompt_attention_mask = prompt_outputs["attention_mask"][0].tolist()
@@ -240,6 +295,17 @@ class ParallelEnvManager(object):
                 reward_scores=trajectory.reward.model_dump(),
                 max_prompt_len=self.config.data.max_prompt_length,
                 max_response_len=self.config.data.max_response_length,
+                extras={
+                    "add_exp": trajectory.metadata.get("add_exp", None),
+                    # Flag for experience incorporation
+
+                    "task_train_expmode": trajectory.metadata.get("task_train_exp_mode", None), 
+                    # Mode for handling experience during trajectory-to-sample conversion:
+                    # Specifies whether to retain or discard experience data
+                    
+                    "experience": experiences   
+                    # List of experience values associated with the trajectory
+                },
             )
             sample.truncate_output_ids()
             samples.append(sample)
@@ -256,7 +322,9 @@ class ParallelEnvManager(object):
         prompt_loss_mask, response_loss_mask = [], []
         messages = []
         reward_scores = []
-
+        extras = [] # List of dictionaries containing supplementary data for each trajectory, including "add_exp", "task_train_expmode", "experience"
+        exp_mask_list = []  # List of binary masks indicating whether to consider off_clip_high for each sample in the batch
+        
         for sample in samples:
             # Validate that all fields have the same length
             assert len(sample.input_ids) == len(sample.attention_mask) == len(sample.position_ids) == len(
@@ -310,6 +378,15 @@ class ParallelEnvManager(object):
 
             messages.append({"messages": sample.messages})
             reward_scores.append(sample.reward_scores)
+            extras.append(sample.extras)
+
+            # Create experience mask: 1 if off_clip_high conditions met (add_exp=True, task_train_expmode="discard"), else 0
+            if sample.extras.get("add_exp", False) and sample.extras.get("task_train_expmode", None)=="discard":
+                exp_mask_list.append(torch.ones(len(sample.loss_mask), dtype=torch.int))
+            else:
+                exp_mask_list.append(torch.zeros(len(sample.loss_mask), dtype=torch.int))
+
+
 
         # Batch and pad sequences
         # ------------- shuchang 0714: pad step_ids and steps_texts ------------
@@ -348,6 +425,9 @@ class ParallelEnvManager(object):
         response_loss_mask = pad_sequence(response_loss_mask, batch_first=True, padding_value=0)
         response_loss_mask = pad_sequence_to_length(response_loss_mask, self.config.data.max_response_length, 0)
 
+        exp_mask = pad_sequence(exp_mask_list, batch_first=True, padding_value=0)
+        exp_mask = pad_sequence_to_length(exp_mask, self.config.data.max_prompt_length + self.config.data.max_response_length, 0)
+
         # Concatenate prompt and response tensors
         input_ids = torch.cat((prompt_ids, response_ids), dim=-1)
         attention_mask = torch.cat((prompt_attention_mask, response_attention_mask), dim=-1)
@@ -355,6 +435,9 @@ class ParallelEnvManager(object):
         loss_mask = torch.cat((prompt_loss_mask, response_loss_mask), dim=-1)
         # shuchang: construct group_id
         group_ids = torch.tensor([int(s.data_id) for s in samples], dtype=torch.long)
+				# Validate masks have same shape
+        assert exp_mask.shape == loss_mask.shape, f"Shape mismatch: {exp_mask.shape} vs {loss_mask.shape}"
+
         # Construct the batch using TensorDict
         batch = TensorDict(
             {
@@ -364,10 +447,11 @@ class ParallelEnvManager(object):
                 "attention_mask": attention_mask,
                 "position_ids": position_ids,
                 "loss_mask": loss_mask,
+                "exp_mask": exp_mask        # add exp_mask by ANNI
                 "step_ids": step_ids_pad,
                 "group_ids": group_ids,   # ★ 新增groupid
             },
             batch_size=len(samples),
         )
 
-        return DataProto(batch=batch, non_tensor_batch={"messages": np.array(messages), "reward_scores": np.array(reward_scores), "steps": np.array(steps_texts_list, dtype=object)})
+        return DataProto(batch=batch, non_tensor_batch={"messages": np.array(messages), "reward_scores": np.array(reward_scores), "steps": np.array(steps_texts_list, dtype=object), "extras": np.array(extras)})  # add extras by ANNI

@@ -34,7 +34,7 @@ class EnvClient:
         except requests.exceptions.RequestException as e:
             raise Exception(f"Request failed: {str(e)}, data: {data}")
 
-    def get_task_ids(
+    def get_env_profile(
         self, env_type: str, split: str = "train", params: dict | None = None
     ) -> List[str]:
         """获取任务ID列表"""
@@ -42,7 +42,7 @@ class EnvClient:
         if params:
             payload["params"] = params
         response = self._make_request(
-            endpoint="get_task_ids", env_type=env_type, params={"split": split}
+            endpoint="/get_env_profile", env_type=env_type, params={"split": split}
         )
         return response["data"]
 
@@ -102,7 +102,7 @@ def main():
 
     env_type = "appworld"
     # 获取任务列表
-    task_ids = client.get_task_ids(env_type)
+    task_ids = client.get_env_profile(env_type)
     print(f"Available tasks: {task_ids}")
 
     # 创建实例

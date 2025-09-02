@@ -17,38 +17,48 @@
 FSDP PPO Trainer with Ray-based single controller.
 This trainer supports model-agonistic model initialization with huggingface
 """
-
+import os
 import uuid
 from collections import defaultdict
 from concurrent.futures.thread import ThreadPoolExecutor
 from copy import deepcopy
 from pprint import pprint
-from typing import List
+from typing import List, Optional, Any
 
+from loguru import logger
 import numpy as np
 import ray
 import torch
-from omegaconf import OmegaConf
+import random
+import json
+from omegaconf import OmegaConf, open_dict
 from tqdm import tqdm
+from torch.utils.data import SequentialSampler,IterableDataset,Dataset,Sampler
+from torchdata.stateful_dataloader import StatefulDataLoader
+from beyondagent.client.env_client import EnvClient
+from beyondagent.module.task_manager.task_manager import AutoReloadDataset, FullDataset
 from verl import DataProto
 from verl.single_controller.ray import RayClassWithInitArgs, create_colocated_worker_cls
+from verl.single_controller.ray.base import RayWorkerGroup
+from verl.trainer.ppo import core_algos
 from verl.trainer.ppo.core_algos import agg_loss
 from verl.trainer.ppo.metric_utils import (compute_data_metrics,
                                            compute_throughout_metrics,
                                            compute_timing_metrics,
                                            process_validation_metrics)
-from verl.trainer.ppo.ray_trainer import (AdvantageEstimator, RayPPOTrainer,
+from verl.trainer.ppo.ray_trainer import (AdvantageEstimator, RayPPOTrainer, ResourcePoolManager, WorkerType,
                                           _timer, apply_kl_penalty,
                                           compute_advantage,
                                           compute_response_mask, Role)
-import verl.utils.torch_functional as verl_F
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
+from verl.utils.dataset.rl_dataset import RLHFDataset
 from verl.utils.metric import reduce_metrics
 
 from beyondagent.client.em_client import EMClient
 from beyondagent.module.env_manager.env_manager import ParallelEnvManager
 from beyondagent.schema.task import Task
 from beyondagent.schema.trajectory import Trajectory
+from verl.utils.tracking import ValidationGenerationsLogger
 from beyondagent.utils.plot_entropy import log_token_entropy
 from beyondagent.module.advantage_assignment.token_level_assignment import _add_entropy_mask as _add_advantage_mask
 
@@ -200,6 +210,101 @@ class BeyondAgentRayPPOTrainer(RayPPOTrainer):
         self.em_client = EMClient(base_url=self.config.experience_maker.base_url)
         self.env_manager = ParallelEnvManager(config=self.config, async_rollout_manager=self.async_rollout_manager, max_parallel=self.config.actor_rollout_ref.rollout.max_env_worker)
         self.thread_pool = ThreadPoolExecutor(max_workers=self.config.thread_pool.max_workers)
+    
+    
+    def _create_dataloader_from_manager(self, collate_fn, shuffle_trainset: bool = True):
+        """
+        Creates the train and validation dataloaders.
+        
+        1. Check the existence of train and val files and load local tasks from them. If no files given, load tasks from environment (train and val/dev splits).
+        2. Use task manager to generate synthetic tasks for trainset, and load the original val dataset.
+        3. Use task manager to mix tasks from different sources.
+        4. Adapt datasets and create dataloaders used in the trainer.
+        
+        """
+        # TODO: we have to make sure the batch size is divisible by the dp size
+        if collate_fn is None:
+            from verl.utils.dataset.rl_dataset import collate_fn as default_collate_fn
+
+            collate_fn = default_collate_fn
+        
+        
+        from verl.trainer.main_ppo import create_rl_dataset
+        # load train dataset from files or environment
+        env_client=EnvClient(self.config.env_service.env_url)
+        if self.config.data.train_files is not None:
+            train_seed_dataset = create_rl_dataset(self.config.data.train_files, self.config.data, self.tokenizer, self.processor)
+            assert isinstance(train_seed_dataset,RLHFDataset), "train_dataset must be RLHFDataset"
+            self.train_task_manager.load_tasks_from_dataset(train_seed_dataset,env_type=self.config.env_service.env_type)
+        else:
+            self.train_task_manager.load_tasks_from_environment(env_client,env_type=self.config.env_service.env_type,split="train")
+        # load val dataset
+        if self.config.data.val_files is not None:
+            val_seed_dataset = create_rl_dataset(self.config.data.val_files, self.config.data, self.tokenizer, self.processor)
+            assert isinstance(val_seed_dataset,RLHFDataset), "train_dataset must be RLHFDataset"
+            self.val_task_manager.load_tasks_from_dataset(val_seed_dataset,env_type=self.config.env_service.env_type)
+        else:
+            for split in ['val','dev']:
+                if self.val_task_manager.load_tasks_from_environment(env_client,env_type=self.config.env_service.env_type,split=split)>0:
+                    break
+        
+        self.train_dataset=self.train_task_manager.get_or_load_full_dataset(filepath=self.config.task_manager.train_data_path,tokenizer=self.tokenizer,config=self.config.data,processor=self.processor)
+        # although limiting dataset to only the original is possibile with strategy, we want to avoid the rollout process on val data.
+        self.val_dataset=self.val_task_manager.get_original_dataset(tokenizer=self.tokenizer,config=self.config.data,processor=self.processor)
+        
+        assert not isinstance(self.train_dataset,AutoReloadDataset), "please disable multiple workers for AutoReloadDataset"
+        assert not isinstance(self.val_dataset,AutoReloadDataset), "please disable multiple workers for AutoReloadDataset"
+        self.train_dataloader = StatefulDataLoader(
+            dataset=self.train_dataset,
+            batch_size=self.config.data.get("gen_batch_size", self.config.data.train_batch_size),
+            num_workers=self.config.data.get("dataloader_num_workers", 8),
+            drop_last=True,
+            collate_fn=collate_fn,
+            sampler=create_rl_sampler(self.config.data,self.train_dataset),
+        )
+
+        val_batch_size = self.config.data.val_batch_size  # Prefer config value if set
+        if val_batch_size is None:
+            val_batch_size = len(self.val_dataset) # type: ignore
+
+        self.val_dataloader = StatefulDataLoader(
+            dataset=self.val_dataset,
+            batch_size=val_batch_size,
+            num_workers=self.config.data.get("dataloader_num_workers", 8),
+            shuffle=self.config.data.get("validation_shuffle", True),
+            drop_last=False,
+            collate_fn=collate_fn,
+        )
+        
+        # train dataloader is on-the-fly, so we don't need to check the size
+        # assert len(self.train_dataloader) >= 1, "Train dataloader is empty!"
+        assert len(self.val_dataloader) >= 1, "Validation dataloader is empty!"
+
+        
+        if not isinstance(self.train_dataset,IterableDataset):
+            total_training_steps = len(self.train_dataloader) * self.config.trainer.total_epochs
+            print(f"Size of train dataloader: {len(self.train_dataloader)}, Size of val dataloader: {len(self.val_dataloader)}")
+        else:
+            # FIXME: need a elegant way to set total_training_steps
+            total_training_steps = len(self.train_task_manager.seed_tasks)*self.config.trainer.total_epochs
+            print(f"Size of train dataloader: unknown, Size of val dataloader: {len(self.val_dataloader)}")
+
+        if self.config.trainer.total_training_steps is not None:
+            total_training_steps = self.config.trainer.total_training_steps
+
+        self.total_training_steps = total_training_steps
+        print(f"Total training steps: {self.total_training_steps}")
+
+        try:
+            OmegaConf.set_struct(self.config, True)
+            with open_dict(self.config):
+                if OmegaConf.select(self.config, "actor_rollout_ref.actor.optim"):
+                    self.config.actor_rollout_ref.actor.optim.total_training_steps = total_training_steps
+                if OmegaConf.select(self.config, "critic.optim"):
+                    self.config.critic.optim.total_training_steps = total_training_steps
+        except Exception as e:
+            print(f"Warning: Could not set total_training_steps in config. Structure missing? Error: {e}")
+
 
     def _get_semantic_config(self):
         """
@@ -216,6 +321,7 @@ class BeyondAgentRayPPOTrainer(RayPPOTrainer):
             print(f"[semantic_config] Using default api_max_retries: {config.api_max_retries}")
         
         return config
+
 
     def _validate_config(self):
         # 0623 yunpeng add. keep the same as the original func except for the param of tool_config_path
@@ -336,6 +442,86 @@ class BeyondAgentRayPPOTrainer(RayPPOTrainer):
             # 0623 yunpeng comment: no need this tool_config_path
             # assert config.actor_rollout_ref.rollout.multi_turn.tool_config_path is not None or config.actor_rollout_ref.rollout.multi_turn.interaction_config_path is not None, "tool_config_path or interaction_config_path must be set when enabling multi_turn with tool, due to no role-playing support"
             assert config.algorithm.adv_estimator in [AdvantageEstimator.GRPO], "only GRPO is tested for multi-turn with tool"
+
+        print("[validate_config] All configuration checks passed successfully!")
+
+    ##################
+    # ANNI
+    def _dump_generations(self, inputs, outputs, experiences, scores, reward_extra_infos_dict, dump_path):
+        """Dump rollout/validation samples as JSONL."""
+        os.makedirs(dump_path, exist_ok=True)
+        filename = os.path.join(dump_path, f"{self.global_steps}.jsonl")
+
+        n = len(inputs)
+        base_data = {
+            "input": inputs,
+            "output": outputs,
+            "experience": experiences,
+            "score": scores,
+            "step": [self.global_steps] * n,
+        }
+
+        for k, v in reward_extra_infos_dict.items():
+            if len(v) == n:
+                base_data[k] = v
+
+        lines = []
+        for i in range(n):
+            entry = {k: v[i] for k, v in base_data.items()}
+            lines.append(json.dumps(entry, ensure_ascii=False))
+
+        with open(filename, "w") as f:
+            f.write("\n".join(lines) + "\n")
+
+        print(f"Dumped generations to {filename}")
+    
+    def summarize_trajectories_in_batches(self, trajectories: List[Any], batch_size: int = 8, sleep_time: int = 30):
+        """
+        Asynchronously submit trajectory summarization tasks in batches and collect all experiences.
+
+        Args:
+            trajectories: List of trajectories to summarize.
+            batch_size: Number of trajectories per batch.
+            sleep_time: Delay between batch submissions in seconds.
+
+        Returns:
+            List[Any]: List of summarized experiences.
+        """
+        experience_list = []
+
+        total_trajectories = len(trajectories)
+        summary_tasks = []
+
+        print("Async submit summary tasks in batches~")
+
+        for i in range(0, total_trajectories, batch_size):
+            batch = trajectories[i: i + batch_size]
+
+            task = self.thread_pool.submit(
+                self.em_client.call_summarizer,
+                trajectories=batch,
+                workspace_id=self.config.experience_maker.workspace_id
+            )
+            summary_tasks.append(task)
+
+            if i + batch_size < total_trajectories:
+                time.sleep(sleep_time)
+
+        print("Wait for all summary tasks to complete~")
+        for task in summary_tasks:
+            try:
+                result = task.result()
+                if result:
+                    experience_list.extend(result)
+            except Exception as e:
+                print(f"Error occurred in a summary task: {e}")
+
+        # Print out all collected experiences
+        for i, experience in enumerate(experience_list):
+            print(f"index={i} experience={experience}")
+
+        return experience_list
+    ##################
 
     def _validate(self):
         data_source_lst = []

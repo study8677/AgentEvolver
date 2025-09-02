@@ -1,29 +1,41 @@
-
+# Model files and checkpoints
 **/*.pt
+!important_models/*.pt  # 如果有重要模型需要跟踪，可以这样排除
 **/checkpoints
+**/*.ckpt
+*.lock
+
+# Build and temporary files
 **/wget-log
 **/_build/
-**/*.ckpt
-**/outputs
 **/*.tar.gz
-**/playground
 **/wandb
 **/__pycache__/
 
+# Outputs and logs (更具体的规则)
+**/outputs/
+!**/outputs/README.md  # 保留重要的说明文件
+**/logs/
+**/log/
+python_log/
+experiments/
+
+# Development and testing
+**/playground/
+!**/playground/README.md  # 保留重要的说明文件
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
 *$py.class
-dataset/*
 tensorflow/my_graph/*
 .idea/
+
 # C extensions
 *.so
 
 # Distribution / packaging
 .Python
-env/
 build/
 develop-eggs/
 dist/
@@ -41,8 +53,6 @@ tmp/
 *.egg
 
 # PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
 
@@ -97,7 +107,6 @@ celerybeat-schedule
 # virtualenv
 venv/
 .venv/
-ENV/
 
 # Spyder project settings
 .spyderproject
@@ -114,18 +123,20 @@ ENV/
 # vim
 *.swp
 
-# ckpt
-*.lock
-
-# data
+# Data files
 *.parquet
 
+# Local resources and scripts
+/_resources
+/sync_*.sh
+/best_logger
+launcher
+cradle.py
+Note
+tasks_explored.train.json
+anni_scripts
+anni_scripts/run_baseline_0825.sh
+temp.sh
 
-# local logs
-logs
-log
-outputs
-python_log
-experiments
 scripts/*
 examples/*

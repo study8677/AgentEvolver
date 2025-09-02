@@ -14,10 +14,15 @@
 """
 Note that we don't combine the main with ray_trainer as ray_trainer is used by other main.
 """
-from best_logger import register_logger
+# from best_logger import register_logger
+from beyondagent.client.llm_client import DashScopeClient
+from beyondagent.module.task_manager.base import NaiveTaskObjectiveRetrieval
+from beyondagent.module.task_manager.data_mixture import OriginalOnlyStrategy, UnifiedMixtureStrategy
+from beyondagent.module.task_manager.strategies.random import LlmRandomSamplingExploreStrategy
+from beyondagent.module.task_manager.task_manager import TaskManager
 
-non_console_mods = ["appworld_io"]
-register_logger(non_console_mods=non_console_mods, auto_clean_mods=[], base_log_path="logs/beyondagent", debug=True)
+# non_console_mods = ["appworld_io"]
+# register_logger(non_console_mods=non_console_mods, auto_clean_mods=[], base_log_path="logs/beyondagent", debug=True)
 
 import os
 import hydra
@@ -63,7 +68,7 @@ def get_custom_reward_fn(config):
     return wrapped_fn
 
 
-@hydra.main(config_path="config", config_name="beyond_agent_dataflow", version_base=None)
+@hydra.main(config_path="../config", config_name="beyond_agent_dataflow", version_base=None)
 def main(config):
     run_ppo(config)
 
@@ -119,8 +124,12 @@ class TaskRunner:
             from verl.workers.fsdp_workers import (ActorRolloutRefWorker,
                                                    AsyncActorRolloutRefWorker,
                                                    CriticWorker)
-
-            actor_rollout_cls = AsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
+            ####################
+            # ANNI
+            from beyondagent.module.exp_manager.het_fsdp_worker import HETAsyncActorRolloutRefWorker, HETActorRolloutRefWorker
+            actor_rollout_cls = HETAsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else HETActorRolloutRefWorker
+            # actor_rollout_cls = AsyncActorRolloutRefWorker if config.actor_rollout_ref.rollout.mode == "async" else ActorRolloutRefWorker
+            ####################
             ray_worker_group_cls = RayWorkerGroup
 
         elif config.actor_rollout_ref.actor.strategy == "megatron":
@@ -178,10 +187,42 @@ class TaskRunner:
         resource_pool_manager = ResourcePoolManager(resource_pool_spec=resource_pool_spec, mapping=mapping)
 
         from verl.utils.dataset.rl_dataset import collate_fn
-
-        train_dataset = create_rl_dataset(config.data.train_files, config.data, tokenizer, processor)
-        val_dataset = create_rl_dataset(config.data.val_files, config.data, tokenizer, processor)
-        train_sampler = create_rl_sampler(config.data, train_dataset)
+        
+        # init task manager
+        llm_client=DashScopeClient(model_name=config.task_manager.llm_client)
+        assert config.task_manager.strategy == "random", "only random strategy is supported now"
+        strategy=LlmRandomSamplingExploreStrategy(
+            tokenizer=tokenizer,
+            config=config,
+            **config.task_manager.strategy_args
+        )
+        train_task_manager=TaskManager(
+            config=config,
+            exploration_strategy=strategy,
+            llm_client=llm_client, # or use policy model
+            old_retrival=NaiveTaskObjectiveRetrieval(),
+            mixture_strategy=UnifiedMixtureStrategy(
+                use_original=config.task_manager.mixture.use_original_tasks,
+                synthetic_ratio=config.task_manager.mixture.synthetic_data_ratio,
+                shuffle=config.task_manager.mixture.shuffle,
+                seed=42,
+                ),
+            tokenizer=tokenizer,
+            env_service_url=config.env_service.env_url,
+            num_explore_threads=config.task_manager.num_explore_threads,
+            n=config.task_manager.n,
+        )
+        val_task_manager=TaskManager(
+            config=config,
+            exploration_strategy=strategy,
+            llm_client=llm_client, # or use policy model
+            old_retrival=NaiveTaskObjectiveRetrieval(),
+            mixture_strategy=OriginalOnlyStrategy(),
+            tokenizer=tokenizer,
+            env_service_url=config.env_service.env_url,
+            num_explore_threads=config.task_manager.num_explore_threads,
+            n=config.task_manager.n,
+        )
         trainer = BeyondAgentRayPPOTrainer(
             config=config,
             tokenizer=tokenizer,
@@ -191,10 +232,9 @@ class TaskRunner:
             ray_worker_group_cls=ray_worker_group_cls,
             reward_fn=reward_fn,
             val_reward_fn=val_reward_fn,
-            train_dataset=train_dataset,
-            val_dataset=val_dataset,
+            train_task_manager=train_task_manager,
+            val_task_manager=val_task_manager,
             collate_fn=collate_fn,
-            train_sampler=train_sampler,
             device_name=config.trainer.device,
         )
         trainer.init_workers()
@@ -236,29 +276,15 @@ def create_rl_dataset(data_paths, data_config, tokenizer, processor):
     return dataset
 
 
-def create_rl_sampler(data_config, dataset):
-    """Create a sampler for the dataset.
 
-    Arguments:
-        data_config: The data config.
-        dataset (Dataset): The dataset.
-
-    Returns:
-        sampler (Sampler): The sampler.
-    """
-    import torch
-    from torch.utils.data import RandomSampler, SequentialSampler
-
-    # use sampler for better ckpt resume
-    if data_config.shuffle:
-        train_dataloader_generator = torch.Generator()
-        train_dataloader_generator.manual_seed(data_config.get("seed", 1))
-        sampler = RandomSampler(data_source=dataset, generator=train_dataloader_generator)
-    else:
-        sampler = SequentialSampler(data_source=dataset)
-
-    return sampler
 
 
 if __name__ == "__main__":
+    import shutil
+    # this will break ray's initialization
+    # def _safe_guard(name:str):
+    #     import traceback
+    #     traceback.print_stack()
+    #     print(f"{name} is overwritten")
+    # shutil.rmtree=lambda *args, **kwargs: _safe_guard("rmtree")
     main()
