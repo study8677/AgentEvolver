@@ -447,7 +447,7 @@ class ParallelEnvManager(object):
                 "attention_mask": attention_mask,
                 "position_ids": position_ids,
                 "loss_mask": loss_mask,
-                "exp_mask": exp_mask        # add exp_mask by ANNI
+                "exp_mask": exp_mask,        # add exp_mask by ANNI
                 "step_ids": step_ids_pad,
                 "group_ids": group_ids,   # ★ 新增groupid
             },
