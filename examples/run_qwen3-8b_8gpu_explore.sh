@@ -24,13 +24,13 @@ python3 -m beyondagent.main_ppo \
     data.filter_overlong_prompts=True \
     data.truncation='error' \
     data.return_raw_chat=True \
-    actor_rollout_ref.rollout.use_qwen3=True \
+    actor_rollout_ref.rollout.use_qwen3=False \
     actor_rollout_ref.rollout.enable_request_id=False \
     actor_rollout_ref.rollout.prompt_length=20480 \
     actor_rollout_ref.rollout.response_length=2048 \
-    actor_rollout_ref.rollout.max_model_len=20480 \
+    actor_rollout_ref.rollout.max_model_len=25600 \
     actor_rollout_ref.rollout.temperature=0.9 \
-    actor_rollout_ref.model.path=/mnt/data/yunpeng.zyp/models/Qwen3-8B \
+    actor_rollout_ref.model.path=/mnt/data_cpfs/xielipeng.xlp/models/Qwen3-8B \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=16 \
@@ -73,9 +73,9 @@ python3 -m beyondagent.main_ppo \
     experience_maker.enable_summarizer=False \
     experience_maker.enable_context_generator=False \
     experience_maker.workspace_id="w1_qwen25_v2_${current_time}" \
-    task_manager.n=7 \
-    env_service.env_type=bfcl \
-    task_manager.train_data_path=tasks_explored.train.bfcl0815.json \
+    task_manager.n=5 \
+    env_service.env_type=appworld \
+    task_manager.train_data_path=tasks_explored.train.appworld0908.json \
     task_manager.mixture.synthetic_data_ratio=1.0 \
     task_manager.mixture.use_original_tasks=True \
     2>&1 | tee "$log_file" \
