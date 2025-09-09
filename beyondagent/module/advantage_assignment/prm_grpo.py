@@ -934,6 +934,18 @@ def compute_prm_grpo_advantages(
 
     # 提取step_ids和group_ids，并确保数据类型正确
     step_ids = _ensure_tensor(batch.batch["step_ids"], device=device, dtype=torch.long)      # (B, L_resp) with -1 for non-response
+    # >>> add begin: 对齐到真实响应长度 <<<
+    target_L = responses.size(1)
+    if step_ids.size(1) != target_L:
+        if step_ids.size(1) > target_L:
+            step_ids = step_ids[:, :target_L]
+        else:
+            pad = torch.full(
+                (step_ids.size(0), target_L - step_ids.size(1)),
+                -1, device=step_ids.device, dtype=step_ids.dtype
+            )
+            step_ids = torch.cat([step_ids, pad], dim=1)
+    # <<< add end
     group_ids = _ensure_tensor(batch.batch["group_ids"], device=device, dtype=torch.long).view(-1)
 
     # ---- 2. 提取token-level奖励 ----
