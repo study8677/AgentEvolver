@@ -63,7 +63,6 @@ from beyondagent.module.task_manager import TaskManager,NaiveTaskObjectiveRetrie
 from beyondagent.schema.task import Task
 from beyondagent.schema.trajectory import Trajectory
 
-from beyondagent.utils.plot_entropy import log_token_entropy
 from beyondagent.utils.tracking import ValidationGenerationsLogger
 
 
@@ -1088,7 +1087,7 @@ class BeyondAgentRayPPOTrainer(RayPPOTrainer):
                                 verify_step_content(batch, self.tokenizer, sample_idx)
 
                             # === (B) 一次 API / 每样本评估全部 steps ===
-                            from beyondagent.module.advantage_assignment.parallel_semantic_assignment import evaluate_step_flags_parallel_sync
+                            from beyondagent.module.credit_manager.semantic_attribution import evaluate_step_flags_parallel_sync
                             flags, stats = evaluate_step_flags_parallel_sync(
                                 tokenizer=self.tokenizer,
                                 batch=batch,
@@ -1159,7 +1158,7 @@ class BeyondAgentRayPPOTrainer(RayPPOTrainer):
                             
                         if enable_prm_grpo and epoch < prm_epoch:
                             # === (C) PRM → GRPO 后缀和 ===
-                            from beyondagent.module.advantage_assignment.prm_grpo import (
+                            from beyondagent.module.credit_manager.adca_grpo import (
                                 compute_prm_grpo_advantages, PRMHyper
                             )
                             # 读取语义优势总配置与 PRM 子配置
