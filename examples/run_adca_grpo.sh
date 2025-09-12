@@ -131,7 +131,7 @@ python -m beyondagent.main_ppo \
     trainer.val_before_train=False \
     trainer.validation_data_dir="/mnt/data/taoshuchang.tsc/beyondagent/BeyondAgent/experiments/origindata_1node/exp_${suffix}_${current_time}/validation_log" \
     trainer.rollout_data_dir="/mnt/data/taoshuchang.tsc/beyondagent/BeyondAgent/experiments/origindata_1node/exp_${suffix}_${current_time}/rollout_log" \
-    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=25600 \
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=20480 \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=25600 \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=25600 \
     critic.ppo_max_token_len_per_gpu=25600 \
