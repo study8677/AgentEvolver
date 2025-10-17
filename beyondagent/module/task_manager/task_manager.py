@@ -108,6 +108,10 @@ class TaskManager(object):
             list[Task]: The list of seed tasks.
         """
         return self._tasks
+    
+    @property
+    def seed_task_objectives(self):
+        return [TaskObjective(task=task,confidence=1.0,reward=None) for task in self.seed_tasks]
 
     def load_tasks(self,tasks:Sequence[Task]):
         self._tasks.extend(tasks)
@@ -149,13 +153,13 @@ class TaskManager(object):
             logger.info(f"loaded tasks from environment, #tasks={len(self._tasks)}")
         except requests.exceptions.RequestException as e:
             logger.error(f"failed to load tasks from environment: {e}")
-            raise from e
+            raise
         return len(response)
 
     def register_filter(self, filter: TaskPostFilter):
         self._realtime_filters.append(filter)
 
-    def get_onthefly_dataset(self, bs: int, tokenizer, config,processor):
+    def _get_onthefly_dataset(self, bs: int, tokenizer, config,processor):
         """
         Get dataset on the fly.
 
@@ -168,30 +172,6 @@ class TaskManager(object):
         # autoreloaddataset does not support mixture
         raise NotImplementedError("get_onthefly_dataset is not implemented")
         # return AutoReloadDataset(self,iter(self._tasks),bs,self._mix_original_tasks,tokenizer=tokenizer,config=config,processor=processor)
-
-    def get_or_load_full_dataset(self,filepath:Optional[str],*,config,tokenizer,processor)->"FullDataset":
-        """Get the full dataset, or load from file.
-        """
-        seed_tasks=[TaskObjective(task=task,confidence=1.0,reward=None) for task in self._tasks]
-        dataset=FullDataset(self,seed_tasks,self._mixture_strategy,self._reward_config,tokenizer=tokenizer,config=config,processor=processor)
-
-        if filepath is not None and os.path.exists(filepath):
-            logger.info(f"loading full dataset from {filepath}")
-            dataset.load_from_file(filepath)
-        else:
-            dataset.reload()
-            if filepath is not None:
-                dataset.save_to_file(filepath)
-
-        return dataset
-
-    def get_original_dataset(self,*,tokenizer,config,processor)->"FullDataset":
-        """Get the original dataset.
-        """
-        seed_tasks=[TaskObjective(task=task,confidence=1.0,reward=None) for task in self._tasks]
-        dataset = FullDataset(self,seed_tasks,OriginalOnlyStrategy(),self._reward_config,tokenizer=tokenizer,config=config,processor=processor)
-        dataset.load_from_file('[unknown]')
-        return dataset
 
 
     def _compute_tasks_hash(self, tasks: Sequence[Task]) -> str:
@@ -368,27 +348,45 @@ class FullDataset(Dataset):
 
     def __init__(self,
                  manager: TaskManager,
-                 tasks: Sequence[TaskObjective],
                  mixture_strategy: MixtureStrategy,
                  reward_config:RewardProps,
+                 cache_path: Optional[str] = None,
                  *,
                  tokenizer,
                  config,
                  processor):
         self._manager = manager
-        self._tasks = list(tasks)
-        assert all([x.task.evaluator==reward_config["original_grader"] for x in tasks]), "task evaluator must be set as the config"
+        self._tasks = self._manager.seed_task_objectives
+        assert all([x.task.evaluator==reward_config["original_grader"] for x in self._tasks]), "task evaluator must be set as the config"
         self._mixture_strategy = mixture_strategy
         self._reward_config=reward_config
+        self._cache_path = cache_path
+        
         self._tokenizer = tokenizer
         self._config = config
         self._processor = processor
+        
         self._objectives = []
         self._dataset = None
         self._synthetic_objectives = []
 
         # tag, used to mark whether the dataset needs to be refreshed
         self._refresh_after_epoch = False
+        
+        # prepare the synthetic dataset if needed
+        if self._mixture_strategy.need_synthetic:
+            if self._cache_path is not None and os.path.exists(self._cache_path):
+                logger.info(f"loading synthetic objectives from file {self._cache_path}")
+                self.load_from_file() # load synthetic data
+            else:
+                self.reload_new_task() # generate synthetic data
+                if self._cache_path is not None:
+                    logger.debug("saving synthetic objectives to cache file")
+                    self.save_to_file()
+        
+        # build hybrid dataset
+        self._rebuild_dataset()
+        
 
     def _rebuild_dataset(self):
         """
@@ -432,7 +430,7 @@ class FullDataset(Dataset):
         self._mixture_strategy = strategy  # ⭐ Update the mixture strategy
         logger.info(f"mixture strategy updated to: {type(strategy).__name__}")
 
-    def save_to_file(self, filepath: str):
+    def save_to_file(self):
         """
         Saves the JSON representation of each synthetic objective to a specified file.
 
@@ -442,11 +440,12 @@ class FullDataset(Dataset):
         Returns:
             None
         """
-        with open(filepath, "w") as f:
+        assert self._cache_path is not None
+        with open(self._cache_path, "w") as f:
             f.writelines([ob.json() + "\n" for ob in self._synthetic_objectives])  # ⭐ Writes each objective's JSON to the file
-        logger.info(f"Saved {len(self._objectives)} objectives to {filepath}")  # ⭐ Logs the number of objectives saved
+        logger.info(f"Saved {len(self._objectives)} objectives to {self._cache_path}")  # ⭐ Logs the number of objectives saved
 
-    def load_from_file(self, filepath: str):
+    def load_from_file(self):
         """
         Loads objectives from a specified file. This function is currently incomplete.
 
@@ -456,8 +455,12 @@ class FullDataset(Dataset):
         Returns:
             None
         """
-        if os.path.exists(filepath):
-            with open(filepath, "r") as f:
+        if self._cache_path is None:
+            logger.error("trying to load synthetic objectives from file, but cache_path is not set")
+            return
+        
+        if os.path.exists(self._cache_path):
+            with open(self._cache_path, "r") as f:
                 self._synthetic_objectives = []
                 for line in filter(lambda x: x.strip() != "", f.readlines()):
                     # patch old data: open query
@@ -472,11 +475,9 @@ class FullDataset(Dataset):
                         tmp.ground_truth = json.loads(line)['ground_truth']
                     self._synthetic_objectives.append(tmp)
         else:
-            # this is a special path to skip loading from file
-            if filepath != '[unknown]':
-                raise FileNotFoundError(f"file {filepath} not found")
-            self._synthetic_objectives = []
-
+            raise FileNotFoundError(f"failed to load synthetic objectives from file {self._cache_path}, file not found")
+        
+        # check if all synthetic objectives have ground_truth
         for item in self._synthetic_objectives:
             assert item.ground_truth is not None
 
@@ -484,9 +485,8 @@ class FullDataset(Dataset):
         for item in self._synthetic_objectives:
             item.task.evaluator=self._reward_config["synthetic_grader"]  # ⭐ Update the evaluator for each task
 
-        self._rebuild_dataset()
 
-    def reload(self):
+    def reload_new_task(self):
         """
         Regenerates the synthetic objectives, updates their evaluators, and rebuilds the dataset.
 
@@ -496,7 +496,7 @@ class FullDataset(Dataset):
         logger.info("patching grader config to all synthetic data")
         for item in self._synthetic_objectives:
             item.task.evaluator=self._reward_config["synthetic_grader"]  # ⭐ Update the evaluator for each task
-        self._rebuild_dataset()
+        
 
     def get_statistics(self) -> dict:
         """

@@ -1,4 +1,5 @@
-from .task_manager import TaskManager
+from beyondagent.module.task_manager.env_profiles import EnvProfile
+from .task_manager import TaskManager,FullDataset
 from .base import TaskObjectiveRetrieval,NaiveTaskObjectiveRetrieval
 import hydra
 
@@ -31,13 +32,13 @@ def run_task_manager(config):
     ta=TaskManager(
         config=config,
         exploration_strategy=config.task_manager.strategy,
+        env_profile=EnvProfile.load_from_json(config.task_manager.env_profile),
         exploration_strategy_args=config.task_manager.strategy_args,
-        user_profile=None,
         llm_client=llm_client, # or use policy model
         old_retrival=NaiveTaskObjectiveRetrieval(),
         mixture_strategy=UnifiedMixtureStrategy(
-            use_original=config.task_manager.mixture.use_original_tasks,
-            synthetic_ratio=config.task_manager.mixture.synthetic_data_ratio,
+            use_original=False,
+            synthetic_ratio=1.0, # force synthetic_ratio to 1.0, as lazy generation is used
             shuffle=config.task_manager.mixture.shuffle,
             seed=42,
             ),
@@ -50,8 +51,11 @@ def run_task_manager(config):
     env_client=EnvClient(config.env_service.env_url)  # ⭐ Initialize the environment client
     seed_tasks=ta.load_tasks_from_environment(env_client,env_type=config.env_service.env_type,split="train")  # ⭐ Load seed tasks from the environment
     print("#seed_tasks: ",seed_tasks)
-    generated=ta.generate_task(ta._tasks,show_progress=True)  # ⭐ Generate new tasks
-    print(len(generated))
+
+    print("generating synthetic tasks...")
+    dataset = FullDataset(ta, ta._mixture_strategy, ta._reward_config, cache_path=config.task_manager.train_data_path, tokenizer=tokenizer, config=config, processor=None)
+
+    print(len(dataset))
 
 if __name__=="__main__":
     run_task_manager()

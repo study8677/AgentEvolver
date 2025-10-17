@@ -9,6 +9,11 @@ from loguru import logger
 
 class MixtureStrategy(ABC):
     """Data Mixture Strategy Interface"""
+    
+    @property
+    def need_synthetic(self) -> bool:
+        """Whether the strategy needs synthetic data."""
+        return False
 
     @abstractmethod
     def mix_data(self,
@@ -67,6 +72,11 @@ class UnifiedMixtureStrategy(MixtureStrategy):
 
         if synthetic_ratio < 0:
             raise ValueError("synthetic_ratio must be non-negative")
+    
+    @property
+    def need_synthetic(self) -> bool:
+        """Whether the strategy needs synthetic data."""
+        return self._synthetic_ratio > 0
 
     def mix_data(self,
                  synthetic_objectives: List[TaskObjective],

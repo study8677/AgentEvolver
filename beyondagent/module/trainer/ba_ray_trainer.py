@@ -544,9 +544,24 @@ class BeyondAgentRayPPOTrainer(RayPPOTrainer):
             
             assert num_loaded_val_tasks > 0, "failed to load val/dev dataset from environment"
         
-        self.train_dataset=self.train_task_manager.get_or_load_full_dataset(filepath=self.config.task_manager.train_data_path,tokenizer=self.tokenizer,config=self.config.data,processor=self.processor)
-        # although limiting dataset to only the original is possibile with strategy, we want to avoid the rollout process on val data.
-        self.val_dataset=self.val_task_manager.get_original_dataset(tokenizer=self.tokenizer,config=self.config.data,processor=self.processor)
+        self.train_dataset = FullDataset(
+            self.train_task_manager,
+            self.train_task_manager._mixture_strategy,
+            self.train_task_manager._reward_config,
+            self.config.task_manager.train_data_path,
+            tokenizer=self.tokenizer,
+            config=self.config,
+            processor=self.processor,
+        )
+        self.val_dataset = FullDataset(
+            self.val_task_manager,
+            self.val_task_manager._mixture_strategy,
+            self.val_task_manager._reward_config,
+            cache_path=None,
+            tokenizer=self.tokenizer,
+            config=self.config,
+            processor=self.processor,
+        )
 
         assert not isinstance(self.train_dataset,AutoReloadDataset), "please disable multiple workers for AutoReloadDataset"
         assert not isinstance(self.val_dataset,AutoReloadDataset), "please disable multiple workers for AutoReloadDataset"
