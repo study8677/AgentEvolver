@@ -110,14 +110,15 @@ experience_maker:
   val_summarizer_save: False
 
 
-hybrid_experience_training:
-  enable: False
+exp_manager:
   val_rollout_expmode: "woexp"    # dev集上rollout是否加经验: ["mixed", "all", "woexp"]
   train_rollout_expmode: "woexp"  # train集上rollout是否加经验: ["mixed", "all", "woexp"]
   rollout_expratio: 0.0           # rollout时在group内部加经验的比例, train&val 保持一致
-  train_sample_expmode: "keep"    # train集上rollout之后转换成训练样本保留/剔除/混合经验: ["keep", "discard", "hybrid"]
+  train_sample_expmode: "alldiscard"    # train集上rollout之后转换成训练样本保留/剔除/混合经验: ["allkeep", "alldiscard", "hybrid"]
   train_sample_keepratio: 1.0     # task-level多少比例选择保留经验
   experience_template: "\n\nSome Related Experience to help you to complete the task:<EXP>{}</EXP>"  # 插入经验的模版
+  init_experience_before_training: False  # 是否在训练之前初始化经验池
+  init_experience_only: False  # 是否只初始化经验池
 
 trainer:
   val_only: False

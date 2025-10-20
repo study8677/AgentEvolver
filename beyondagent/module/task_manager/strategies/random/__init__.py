@@ -7,6 +7,7 @@ import uuid
 from loguru import logger
 
 from beyondagent.module.agent_flow.base_agent_flow import BaseAgentFlow
+from beyondagent.module.exp_manager.exp_manager import TrajExpConfig
 from beyondagent.module.task_manager.agent_flow import ModifiedAgentFlow
 from beyondagent.module.task_manager.base import LlmClient
 from beyondagent.module.env_manager.env_worker import EnvWorker
@@ -74,8 +75,7 @@ class LlmRandomSamplingExploreStrategy(TaskExploreStrategy):
         traj = env_worker.execute(
             data_id=data_id,
             rollout_id=rollout_id,
-            add_exp=False,
-            task_train_exp_mode='woexp',
+            traj_exp_config=TrajExpConfig(add_exp=False),
             agent_flow=agent_flow,
             tmux={
                 'step':[0],

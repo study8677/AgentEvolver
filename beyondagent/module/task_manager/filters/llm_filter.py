@@ -8,6 +8,7 @@ from beyondagent.client.env_client import EnvClient
 from beyondagent.module.agent_flow.agent_flow import AgentFlow
 from beyondagent.module.agent_flow.base_agent_flow import BaseAgentFlow
 from beyondagent.module.env_manager.env_worker import EnvWorker
+from beyondagent.module.exp_manager.exp_manager import TrajExpConfig
 from beyondagent.module.task_manager.agent_flow import ModifiedAgentFlow
 from beyondagent.module.task_manager.base import LlmClient
 from beyondagent.schema.task import Task, TaskObjective
@@ -148,7 +149,6 @@ class LlmFilter(TaskPostFilter):
         try:
             worker = EnvWorker(
                 task.task,
-                is_open_query=True, # synthetic query are open
                 config=self._config,
                 thread_index=0,
                 tokenizer=self._tokenizer
@@ -164,8 +164,7 @@ class LlmFilter(TaskPostFilter):
             traj = worker.execute(
                 data_id="unknown",
                 rollout_id="unknown",
-                add_exp=False,
-                task_train_exp_mode='woexp',
+                traj_exp_config=TrajExpConfig(add_exp=False),
                 agent_flow=agent_flow,
                 tmux={
                     'step': [0],

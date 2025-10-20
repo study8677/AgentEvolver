@@ -10,13 +10,14 @@ from beyondagent.utils.utils import convert_tool_to_user_message
 from beyondagent.schema.trajectory import Reward, Trajectory
 from best_logger import register_logger, print_dict, print_listofdict
 from beyondagent.module.context_manager.cmt_linear import Linear_CMT, ExtendedMessage
-from beyondagent.module.context_manager.cmt_linear import Linear_CMT, ExtendedMessage
 # from beyondagent.module.context_manager.cmt_memory import MemoryCMT, GroupedSteps
 from beyondagent.module.context_manager.cmt_linear_think import LinearThinkCMT
 from beyondagent.module.context_manager.cmt_context_clip import SelfContextClipCMT
 from beyondagent.module.agent_flow.reward_calculator import RewardCalculator
 from typing import Any, Dict, List, Union, Optional
 import threading
+from beyondagent.module.exp_manager.exp_manager import TrajExpConfig, ExperienceWorker
+
 
 log_generate_lock = threading.Lock()
 
@@ -36,52 +37,15 @@ class AgentFlow(BaseAgentFlow):
 
         self.instruction_template_ids = self.tokenizer.encode("user\n")  # ⭐ Encode the user instruction template
         self.response_template_ids = self.tokenizer.encode("assistant\n")  # ⭐ Encode the assistant response template
-        self.em_client = EMClient(base_url=self.config.experience_maker.base_url)  # ⭐ Initialize the EMClient
+        # self.em_client = EMClient(base_url=self.config.experience_maker.base_url)  # ⭐ Initialize the EMClient
         self.sparse = self.config.actor_rollout_ref.rollout.sparse  # add sparse by ANNI 0723
-        self.experience_template = self.config.hybrid_experience_training.experience_template
+        # self.experience_template = self.config.hybrid_experience_training.experience_template
         self.cmt: Union[Linear_CMT, LinearThinkCMT] = None
         self.console_debug_mode: bool = self.config.actor_rollout_ref.rollout.debug_llm_io
+        self.exp_worker = ExperienceWorker(config=self.config)
 
 
-    def add_experience(self, init_messages, task_id, data_id, rollout_id, query, add_exp):
-        """
-        Adds historical experience to the current interaction context, enhancing the agent's response with past knowledge.
-
-        Args:
-            init_messages (list): The initial messages in the conversation.
-            task_id (str): The unique identifier for the task.
-            data_id (str): The unique identifier for the data.
-            rollout_id (str): The unique identifier for the rollout.
-            query (str): The user's query or input.
-            add_exp (bool): A flag indicating whether to add historical experience.
-
-        Returns:
-            tuple: A tuple containing the updated messages and metadata from the trajectory.
-        """
-        if self._enable_context_generator and add_exp:
-            trajectory = Trajectory(data_id=data_id, rollout_id=rollout_id, steps=init_messages, query=query)  # ⭐ Create a trajectory object representing the current state
-            history_experience = self.em_client.call_context_generator(
-                trajectory=trajectory,
-                retrieve_top_k=self.config.experience_maker.retrieve_top_k,
-                workspace_id=self.config.experience_maker.workspace_id)
-
-            # from vsdb import bp
-            # bp('t2')
-            if history_experience:
-                logger.info(f"history_experience={history_experience}")
-                formatted_experience = self.experience_template.format(history_experience)
-                new_content = trajectory.steps[-1]["content"] + formatted_experience
-                trajectory.steps[-1]["content"] = new_content  # ⭐ Append the formatted historical experience to the last message
-                init_messages = trajectory.steps
-            else:
-                logger.info(f"history_experience is empty!")
-            return init_messages, trajectory.metadata
-        else:
-            init_messages = init_messages
-            return init_messages, {}
-
-
-    def execute(self, context_manager, init_messages: List[dict], env: EnvClient, instance_id: str, tmux, stop, thread_index, task_id, data_id="", rollout_id="", query="", add_exp=False, **kwargs) -> Linear_CMT:
+    def execute(self, context_manager, init_messages: List[dict], env: EnvClient, instance_id: str, tmux, stop, thread_index, task_id, traj_exp_config,data_id="", rollout_id="", query="", **kwargs) -> Linear_CMT:
         """
         Executes the interaction between the AI agent and the environment, managing the context, experience generation, and reward calculation.
 
@@ -94,10 +58,10 @@ class AgentFlow(BaseAgentFlow):
             stop (list): A list indicating whether to stop the thread.
             thread_index (int): The index of the current thread.
             task_id (str): The ID of the task.
+            traj_exp_config (TrajExpConfig): Experience Configuration for the trajectory.
             data_id (str, optional): The ID of the data. Defaults to "".
             rollout_id (str, optional): The ID of the rollout. Defaults to "".
             query (str, optional): The query string. Defaults to "".
-            add_exp (bool, optional): Whether to add experience. Defaults to False.
             **kwargs: Additional keyword arguments.
 
         Returns:
@@ -108,8 +72,16 @@ class AgentFlow(BaseAgentFlow):
         add_nothink = self.config.actor_rollout_ref.rollout.use_qwen3 # if qwen3, add /no_think
 
         # 1. 🚀 Initialize messages
-        init_messages, metadata = self.add_experience(init_messages, task_id, data_id, rollout_id, query, add_exp)  # ⭐ Initialize messages and metadata
-        self.cmt.metadata = metadata
+        traj_exp_config.query = query
+        init_messages, traj_exp_config = self.exp_worker.manage_rollout_context(
+                init_messages=init_messages,
+                traj_exp_config=traj_exp_config
+                )
+        self.cmt.metadata["task_train_exp_mode"] = traj_exp_config.train_mode
+        self.cmt.metadata["add_exp"] = traj_exp_config.add_exp
+        self.cmt.metadata["experience_list"] = traj_exp_config.experience_list
+        # init_messages, metadata = self.add_experience(init_messages, task_id, data_id, rollout_id, query, add_exp)  # ⭐ Initialize messages and metadata
+        # self.cmt.metadata = metadata
         self.cmt.save_init_input(init_messages, add_nothink)
 
         request_id: str = ""
@@ -199,5 +171,6 @@ class AgentFlow(BaseAgentFlow):
 
         with log_generate_lock:
             self.cmt.generate_log(task_id=task_id)  # ⭐ Generate the log for the task
+
 
         return self.cmt

@@ -11,6 +11,7 @@ from beyondagent.module.context_manager.cmt_linear import Linear_CMT, ExtendedMe
 # from beyondagent.module.context_manager.cmt_memory import MemoryCMT, GroupedSteps
 from beyondagent.module.context_manager.cmt_linear_think import LinearThinkCMT
 from beyondagent.module.context_manager.cmt_context_clip import SelfContextClipCMT
+from beyondagent.module.exp_manager.exp_manager import TrajExpConfig
 from typing import List, Dict, Any, Optional
 
 
@@ -38,15 +39,14 @@ class EnvWorker(object):
         self.thread_index: int = thread_index  # Set the thread index
         self.tokenizer = tokenizer  # Store the tokenizer
 
-    def execute(self, data_id: str, rollout_id: str, add_exp: bool, task_train_exp_mode: str,agent_flow: BaseAgentFlow, tmux:dict,stop:list[bool], system_prompt: Optional[str] = None, **kwargs) -> Trajectory:    # add add_exp & task_train_exp_mode by ANNI
+    def execute(self, data_id: str, rollout_id: str, traj_exp_config: TrajExpConfig, agent_flow: BaseAgentFlow, tmux:dict,stop:list[bool], system_prompt: Optional[str] = None, **kwargs) -> Trajectory:
         """
         Executes the task in the environment, generates a trajectory, and returns it.
 
         Args:
             data_id (str): The unique identifier for the data.
             rollout_id (str): The unique identifier for the rollout.
-            add_exp (bool): Flag indicating whether to add experience.
-            task_train_exp_mode (str): The mode for training experience.
+            traj_exp_config (TrajExpConfig): Experience Configuration for the trajectory.
             agent_flow (BaseAgentFlow): The agent flow to execute the task.
             tmux (dict): TMUX configuration.
             stop (list[bool]): List of flags to indicate stopping conditions.
@@ -93,10 +93,19 @@ class EnvWorker(object):
             traj_cmt.rollout_id = rollout_id
             traj_cmt.task_id = self.task_id
             traj_cmt.instance_id = self.instance_id
-            traj_cmt.task_train_exp_mode = self.task.metadata.get("task_train_exp_mode")
-            traj_cmt.metadata["task_train_exp_mode"] = task_train_exp_mode
+            # traj_cmt.task_train_exp_mode = self.task.metadata.get("task_train_exp_mode")
+            # traj_cmt.metadata["task_train_exp_mode"] = task_train_exp_mode
             assert self.task.query is not None
             traj_cmt.query = self.task.query
+
+            # traj_exp_config.query=self.task.query
+            # init_messages, traj_exp_config = self.exp_worker.manage_rollout_context(
+            #     init_messages=init_messages,
+            #     traj_exp_config=traj_exp_config
+            # )
+            # traj_cmt.metadata["task_train_exp_mode"] = traj_exp_config.train_mode
+            # traj_cmt.metadata["add_exp"] = traj_exp_config.add_exp
+            # traj_cmt.metadata["experience_list"] = traj_exp_config.experience_list
 
             traj_cmt: Trajectory = agent_flow.execute(
                 context_manager=traj_cmt,
@@ -107,10 +116,10 @@ class EnvWorker(object):
                 stop=stop,
                 thread_index=self.thread_index,
                 task_id=self.task_id,
+                traj_exp_config=traj_exp_config,
                 data_id=data_id,
                 rollout_id=rollout_id,
                 query=self.task.query,
-                add_exp=add_exp,
                 **kwargs
             )  # ⭐ Execute the task and generate the trajectory
             self.env.release_instance(self.instance_id)
