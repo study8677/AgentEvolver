@@ -29,6 +29,9 @@ from beyondagent.utils.step_parser import parse_response_ids_to_steps
 from beyondagent.module.task_manager.rewards import LlmAsJudgeRewardCalculator,LlmAsJudgeRewardCalculatorWithGT,LlmAsJudgeBinaryRewardCalculator,LlmAsJudgeBinaryRewardCalculatorWithGT,EnvGrader, AvgBinaryGTJudge, AvgLlmJudge
 from beast_logger import register_logger
 
+from beyondagent.module.exp_manager.exp_manager import TaskExpConfig, TrajExpConfig
+
+
 def init_logger(experiment_name):
     """
     Initializes the logger with the given experiment name and sets up the logging environment.
@@ -77,7 +80,7 @@ class ParallelEnvManager(object):
         self.pad_token_id = self.tokenizer.pad_token_id
         self.rollout_config = config.actor_rollout_ref.rollout
 
-        self.experience_template = config.hybrid_experience_training.experience_template
+        # self.experience_template = config.hybrid_experience_training.experience_template
         self.llm_mode = "local" # use fsdp worker ("local") or use foreign server ("remote")
         self.current_token = 0
         self.current_token_count_time = time.time()
@@ -218,19 +221,18 @@ class ParallelEnvManager(object):
 
 
 
-    def rollout_env_worker(self, task: Task, data_id: str, rollout_id: str, mode: Literal["sample", "validate"],
-                           thread_index: int, add_exp: bool, task_train_exp_mode: str, tmux: dict, stop:list, **kwargs) -> Trajectory: # add add_exp & task_train_exp_mode by ANNI
+    def rollout_env_worker(self, task: Task, traj_exp_config: TrajExpConfig, data_id: str, rollout_id: str, mode: Literal["sample", "validate"],
+                           thread_index: int, tmux: dict, stop:list, **kwargs) -> Trajectory:
         """
         Processes a single task in a thread-safe way, handling retries and exceptions.
 
         Args:
             task (Task): The task to be processed.
+            traj_exp_config (TrajExpConfig): Experience Configuration for the trajectory.
             data_id (str): The ID of the data.
             rollout_id (str): The ID of the rollout.
             mode (Literal["sample", "validate"]): The mode of operation, either 'sample' or 'validate'.
             thread_index (int): The index of the thread.
-            add_exp (bool): Whether to add experience.
-            task_train_exp_mode (str): The mode for training experience.
             tmux (dict): TMUX configuration.
             stop (list): List of stop conditions.
             **kwargs: Additional keyword arguments.
@@ -265,7 +267,7 @@ class ParallelEnvManager(object):
                 )
 
                 env_worker = EnvWorker(task=task, thread_index=thread_index, config=self.config, tokenizer=self.tokenizer)
-                trajectory: Trajectory = env_worker.execute(data_id=data_id, rollout_id=rollout_id, add_exp=add_exp, task_train_exp_mode=task_train_exp_mode, agent_flow=agent_flow, tmux=tmux, stop=stop) # ⭐ Execute the task and generate the trajectory
+                trajectory: Trajectory = env_worker.execute(data_id=data_id, rollout_id=rollout_id, traj_exp_config=traj_exp_config, agent_flow=agent_flow, tmux=tmux, stop=stop) # ⭐ Execute the task and generate the trajectory
                 return trajectory
 
             except Exception as e:
@@ -276,12 +278,13 @@ class ParallelEnvManager(object):
                     logger.bind(exception=True).exception(f"rollout_env_worker failed after {max_retry} retries: {e.args}")
                     raise e
 
-    def rollout(self, tasks: List[Task], mode: Literal["sample", "validate"], epoch: str) -> List[Trajectory]:
+    def rollout(self, tasks: List[Task], task_exp_configs: List[TaskExpConfig], mode: Literal["sample", "validate"], epoch: str) -> List[Trajectory]:
         """
         Executes a list of tasks in a parallel environment using a thread pool, with automatic retries for failed tasks.
 
         Args:
             tasks (List[Task]): A list of tasks to be processed.
+            task_exp_configs (List[TaskExpConfig]): A list of experience configurations corresponding to each task.
             mode (Literal["sample", "validate"]): The mode of operation, either 'sample' or 'validate'.
             epoch (str): The current epoch identifier, used for logging and progress bar.
 
@@ -289,25 +292,8 @@ class ParallelEnvManager(object):
             List[Trajectory]: A sorted list of Trajectory objects representing the results of the successfully completed tasks.
         """
         traj_cmt_array = []
-        #############
-        # ANNI 0814
-        if mode == "validate":
-            rollout_n = self.rollout_config.val_kwargs.n
-            exp_mode = self.config.hybrid_experience_training.val_rollout_expmode
-        else:
-            rollout_n = self.rollout_n
-            exp_mode = self.config.hybrid_experience_training.train_rollout_expmode
-        add_exp_choices = {
-            "woexp": [False] * rollout_n,
-            "mixed": sorted([i < round(rollout_n*self.config.hybrid_experience_training.rollout_expratio) for i in range(rollout_n)], key=lambda _: random.random()),
-            "all": [True] * rollout_n
-        }[exp_mode]
-        task_train_exp_modes = [
-            task.metadata.get("task_train_exp_mode", "keep")
-            for task in tasks
-        ]   # len(tasks)
-
-        future_to_params: Dict[Future, Tuple[Task, str, str, str, int, bool, str, dict, list[bool]]] = {}
+        rollout_n = self.rollout_config.val_kwargs.n if mode == "validate" else self.rollout_n
+        future_to_params: Dict[Future, Tuple[Task, TrajExpConfig, str, str, str, int, dict, list[bool]]] = {}
 
         tmux = {
             'step': [0 for _ in range(len(tasks) * rollout_n)],
@@ -317,11 +303,15 @@ class ParallelEnvManager(object):
 
         with ThreadPoolExecutor(max_workers=self.max_parallel) as executor:
             # 2. submit: submit all tasks to the thread pool
-            for data_id, (task, task_train_exp_mode) in enumerate(zip(tasks, task_train_exp_modes)):
+            for data_id, (task, task_exp_config) in enumerate(zip(tasks, task_exp_configs)):
                 for rollout_id in range(rollout_n):
                     thread_index = data_id * rollout_n + rollout_id
-                    add_exp = add_exp_choices[rollout_id]
-                    params = (task, str(data_id), str(rollout_id), mode, thread_index,add_exp,task_train_exp_mode,tmux,stop)
+                    add_exp = task_exp_config.add_exp[rollout_id]
+                    train_mode = task_exp_config.train_mode
+                    traj_exp_config = TrajExpConfig(
+                        add_exp=add_exp, train_mode=train_mode, task_id=task.task_id, data_id=data_id, rollout_id=rollout_id, mode=mode)
+
+                    params = (task, traj_exp_config, str(data_id), str(rollout_id), mode, thread_index, tmux,stop)
                     future = executor.submit(self.rollout_env_worker, *params)
                     future_to_params[future] = params
 
@@ -378,29 +368,6 @@ class ParallelEnvManager(object):
         return traj_cmt_array
 
 
-    #############
-    # ANNI 0825
-    @staticmethod
-    def extract_and_discard_experience(input_string, experience_template):  # <EXP>{}</EXP>
-        """
-        Extracts the experience part from the input string using a given template and removes it, returning both the extracted experience and the remaining prompt.
-
-        Args:
-            input_string (str): The string from which to extract the experience.
-            experience_template (str): The template used to identify the experience in the input string. It should contain '{}' as a placeholder for the experience.
-
-        Returns:
-            tuple: A tuple containing the extracted experience and the remaining prompt after removing the experience. If no match is found, returns ("", input_string).
-        """
-        pattern = re.escape(experience_template).replace(r'\{\}', '(.*?)')  # ⭐ Escape the template and replace '{}' with a regex group to capture the experience
-        match = re.search(pattern, input_string)
-        if match:
-            experience = match.group(1)  # ⭐ Extract the experience from the matched group
-            prompt = re.sub(pattern, '', input_string)  # ⭐ Remove the experience from the input string to get the remaining prompt
-            return experience, prompt
-        else:
-            return "", input_string
-
     # TODO: define an extra class for trajectory-dataproto converting.
     def to_dataproto(self, cmt_array) -> DataProto:
         """
@@ -429,12 +396,12 @@ class ParallelEnvManager(object):
             cmt (object): The comment object containing metadata.
 
         Returns:
-            dict: A dictionary with keys 'add_exp', 'task_train_expmode', and 'experience' corresponding to their respective values in the comment's metadata.
+            dict: A dictionary with keys 'add_exp', 'task_train_expmode', and 'experience_list' corresponding to their respective values in the comment's metadata.
         """
         extras = {
             "add_exp": cmt.metadata.get("add_exp", None),  # ⭐ Retrieves the 'add_exp' value from metadata
             "task_train_expmode": cmt.metadata.get("task_train_exp_mode", None),  # ⭐ Retrieves the 'task_train_exp_mode' value from metadata
-            "experience": cmt.metadata.get("experience", [])  # ⭐ Retrieves the 'experience' list from metadata
+            "experience_list": cmt.metadata.get("experience_list", [])  # ⭐ Retrieves the 'experience' list from metadata
         }
         return extras
 
@@ -495,7 +462,7 @@ class ParallelEnvManager(object):
         reward_scores = []
         task_ids = []
         rollout_ids = []
-        extras = [] # List of dictionaries containing supplementary data for each trajectory, including "add_exp", "task_train_expmode", "experience"
+        extras = [] # List of dictionaries containing supplementary data for each trajectory, including "add_exp", "task_train_expmode", "experience_list"
         k_text_list = []
         for sample in samples:
             # Validate that all fields have the same length

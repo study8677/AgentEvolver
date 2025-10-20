@@ -10,6 +10,7 @@ from beyondagent.utils.compute_madness import repetition_penalty_reward_scalar
 from beyondagent.module.context_manager.cmt_base import ExtendedMessage, ContextManagerBase
 from beyondagent.module.context_manager.cmt_base import find_sublist_indices, replace_token_ids
 from best_logger import register_logger, print_listofdict, print_dict, print_nested, NestedJsonItem, SeqItem
+from beyondagent.module.exp_manager.exp_manager import ExperienceWorker, TrajExpConfig
 
 
 
@@ -55,10 +56,10 @@ class Linear_CMT(Trajectory, ContextManagerBase):
         self.context_time_cost = 0
         self.tag: str = ""
         self.task_id: str = ""
-        self.task_train_exp_mode: str = ""
+        # self.task_train_exp_mode: str = ""
         self.current_batch_success_rate:float = -1.0
         self.llm_output_mistakes = {}
-        self.experiences = []
+        # self.experiences = []
 
         # log_prob_max_token_len_per_gpu: int = self.config.actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu
         # ref_log_prob_max_token_len_per_gpu: int = self.config.actor_rollout_ref.ref.log_prob_max_token_len_per_gpu
@@ -587,35 +588,18 @@ class Linear_CMT(Trajectory, ContextManagerBase):
         from verl.utils.model import compute_position_id_with_mask
         ext_steps = self.remove_last_non_llm_msg(copy.deepcopy(ext_steps))  # ⭐ Remove the last non-LLM message
 
-        # ANNI experience extraction and discard
-        def extract_and_discard_experience(input_string, experience_template):  # <EXP>{}</EXP>
-            pattern = re.escape(experience_template).replace(r'\{\}', '(.*?)')
-            match = re.search(pattern, input_string)
-            if match:
-                experience = match.group(1)
-                prompt = re.sub(pattern, '', input_string)
-                return experience, prompt
-            else:
-                return "", input_string
-
-        # ANNI experience extraction and discard
-        # from vsdb import bp
-        # bp('X1')
-        if self.task_train_exp_mode == "discard":
-            # "\n\nSome Related Experience to help you to complete the task:<EXP>{}</EXP>"
-            self.experience_template = self.config.hybrid_experience_training.experience_template
-            for i, ext_msg in enumerate(ext_steps):
-                experience, new_content = extract_and_discard_experience(ext_msg.content_for_future, self.experience_template)
-                self.experiences += [experience]
-                if experience:
-                    ext_steps[i] = ExtendedMessage(
-                        author=ext_msg.author,
-                        role=ext_msg.role,
-                        content=new_content,
-                        token_generator='auto',
-                        tokenizer=self.tokenizer,
-                        uuid=ext_msg.uuid,
-                    )
+        exp_worker = ExperienceWorker(self.config)
+        for i, ext_msg in enumerate(ext_steps):
+            experience, new_content = exp_worker.manage_training_context(ext_msg.content_for_future, self.metadata)
+            if experience:
+                ext_steps[i] = ExtendedMessage(
+                    author=ext_msg.author,
+                    role=ext_msg.role,
+                    content=new_content,
+                    token_generator='auto',
+                    tokenizer=self.tokenizer,
+                    uuid=ext_msg.uuid,
+                )
 
         # mapping
         input_ids = []

@@ -65,6 +65,9 @@ from beyondagent.utils.tracking import ValidationGenerationsLogger
 
 from beyondagent.module.adv_processor.adca_grpo_pipeline import apply_adca_grpo
 
+from beyondagent.module.exp_manager.exp_manager import ExperienceManager
+
+
 def parse_reward_from_dataproto(data: DataProto, return_dict=False) -> dict | torch.Tensor:
     """
     Compute reward for a batch of data.
@@ -486,6 +489,7 @@ class BeyondAgentRayPPOTrainer(RayPPOTrainer):
         self.em_client = EMClient(base_url=self.config.experience_maker.base_url)
         self.env_manager = ParallelEnvManager(config=self.config, async_rollout_manager=self.async_rollout_manager, max_parallel=self.config.actor_rollout_ref.rollout.max_env_worker)
         self.thread_pool = ThreadPoolExecutor(max_workers=self.config.thread_pool.max_workers)
+        self.exp_manager = ExperienceManager(config=self.config)
 
 
     def _create_dataloader_from_manager(self, collate_fn, shuffle_trainset: bool = True):
@@ -756,14 +760,13 @@ class BeyondAgentRayPPOTrainer(RayPPOTrainer):
 
     ##################
     # ANNI
-    def _dump_generations(self, inputs, outputs, experiences, scores, reward_extra_infos_dict, dump_path):
+    def _dump_generations(self, inputs, outputs, scores, reward_extra_infos_dict, dump_path):
         """
         Dumps rollout/validation samples as JSONL.
 
         Args:
             inputs (list): List of input data.
             outputs (list): List of output data.
-            experiences (list): List of experience data.
             scores (list): List of score data.
             reward_extra_infos_dict (dict): Dictionary containing additional reward information.
             dump_path (str): Path to the directory where the JSONL file will be saved.
@@ -778,7 +781,6 @@ class BeyondAgentRayPPOTrainer(RayPPOTrainer):
         base_data = {
             "input": inputs,
             "output": outputs,
-            "experience": experiences,
             "score": scores,
             "step": [self.global_steps] * n,
         }
@@ -797,53 +799,6 @@ class BeyondAgentRayPPOTrainer(RayPPOTrainer):
 
         print(f"Dumped generations to {filename}")
 
-    def summarize_trajectories_in_batches(self, trajectories: List[Any], batch_size: int = 8, sleep_time: int = 30):
-        """
-        Asynchronously submit trajectory summarization tasks in batches and collect all experiences.
-
-        Args:
-            trajectories (List[Any]): List of trajectories to summarize.
-            batch_size (int): Number of trajectories per batch.
-            sleep_time (int): Delay between batch submissions in seconds.
-
-        Returns:
-            List[Any]: List of summarized experiences.
-        """
-        experience_list = []
-
-        total_trajectories = len(trajectories)
-        summary_tasks = []
-
-        print("Async submit summary tasks in batches~")
-
-        for i in range(0, total_trajectories, batch_size):
-            batch = trajectories[i: i + batch_size]
-
-            task = self.thread_pool.submit(
-                self.em_client.call_summarizer,
-                trajectories=batch,
-                workspace_id=self.config.experience_maker.workspace_id
-            )  # ⭐ Submit the batch of trajectories for summarization
-            summary_tasks.append(task)
-
-            if i + batch_size < total_trajectories:
-                time.sleep(sleep_time)
-
-        print("Wait for all summary tasks to complete~")
-        for task in summary_tasks:
-            try:
-                result = task.result()  # ⭐ Get the result of the summarization task
-                if result:
-                    experience_list.extend(result)
-            except Exception as e:
-                print(f"Error occurred in a summary task: {e}")
-
-        # Print out all collected experiences
-        for i, experience in enumerate(experience_list):
-            print(f"index={i} experience={experience}")
-
-        return experience_list
-    ##################
 
     def _validate(self):
         """
@@ -859,13 +814,11 @@ class BeyondAgentRayPPOTrainer(RayPPOTrainer):
             None
         """
         data_source_lst = []
-        add_exp_lst = []    # add experience list by ANNI
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
 
         # Lists to collect samples for the table
         sample_inputs = []
         sample_outputs = []
-        sample_experiences_dict = []    # add experience list by ANNI
         sample_scores = []
 
         for i, test_data in enumerate(self.val_dataloader):
@@ -916,8 +869,9 @@ class BeyondAgentRayPPOTrainer(RayPPOTrainer):
                             open_query=test_gen_batch.non_tensor_batch["extras"][i]['open_query'],
                             # evaluator=gen_batch.non_tensor_batch['extras'][i]['evaluator'], # avoid potential bugs
                          ) for i in range(len(test_gen_batch))]
+                task_exp_configs = self.exp_manager.get_complete_exp_configs(tasks, mode="validate")
                 print("=" * 10 + "start validate rollout" + "=" * 10)
-                trajectories = self.env_manager.rollout(tasks, mode="validate", epoch=f"test.1.{i}")  # ⭐ Execute the rollout to generate trajectories
+                trajectories = self.env_manager.rollout(tasks, task_exp_configs, mode="validate", epoch=f"test.1.{i}")  # ⭐ Execute the rollout to generate trajectories
                 print("=" * 10 + "end validate rollout" + "=" * 10)
                 test_output_gen_batch = self.env_manager.to_dataproto(trajectories)
                 # test_output_gen_batch_padded = self.explorer_manager.rollout(test_gen_batch_padded)
@@ -927,8 +881,8 @@ class BeyondAgentRayPPOTrainer(RayPPOTrainer):
             ##################
             # ANNI
             # summary in batch: summary for experience of experience_maker, updating candidate context
-            if self.config.experience_maker.enable_summarizer and self.config.experience_maker.val_summarizer_save:
-                self.summarize_trajectories_in_batches(trajectories)
+            # if self.config.experience_maker.enable_summarizer and self.config.experience_maker.val_summarizer_save:
+            #     self.summarize_trajectories_in_batches(trajectories)
             ##################
 
             # unpad
@@ -948,9 +902,9 @@ class BeyondAgentRayPPOTrainer(RayPPOTrainer):
 
             ##################
             # ANNI
-            # Store extracted experiences
-            experience_infos_dict = test_output_gen_batch.non_tensor_batch["extras"]
-            sample_experiences_dict.extend(experience_infos_dict)
+            # # Store extracted experiences
+            # experience_infos_dict = test_output_gen_batch.non_tensor_batch["extras"]
+            # sample_experiences_dict.extend(experience_infos_dict)
             # sample_experiences_dict:[{'add_exp':bool, 'experience':str}, ...]
             ##################
 
@@ -984,7 +938,6 @@ class BeyondAgentRayPPOTrainer(RayPPOTrainer):
             self._dump_generations(
                 inputs=sample_inputs,
                 outputs=sample_outputs,
-                experiences=sample_experiences_dict,    # add experiences by ANNI
                 scores=sample_scores,
                 reward_extra_infos_dict=reward_extra_infos_dict,
                 dump_path=val_data_dir,
@@ -1010,6 +963,8 @@ class BeyondAgentRayPPOTrainer(RayPPOTrainer):
                     metric_dict[pfx] = metric_val
 
         return metric_dict
+    
+    # [anni1015] TODO: initialize_exp_pool() 初始化经验池函数
 
     def fit(self):
         """
@@ -1045,6 +1000,8 @@ class BeyondAgentRayPPOTrainer(RayPPOTrainer):
             logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
                 return
+
+        # [anni1015] TODO: 调用initialize_exp_pool()函数
 
         # [0616] qingxu: add `RAY_DEBUG_POST_MORTEM` env var to activate breakpoint debugging
         # vscode_conditional_breakpoint()
@@ -1094,37 +1051,20 @@ class BeyondAgentRayPPOTrainer(RayPPOTrainer):
                             self.async_rollout_manager.wake_up()
                             # gen_batch_output = self.explorer_manager.rollout(gen_batch)
 
-                            #############
-                            # ANNI 0814: add task-level train_sample_expmode
-                            train_sample_expmode = self.config.hybrid_experience_training.train_sample_expmode  # ["keep", "discard", "hybrid"]
-
-                            expmode_to_ratio = {
-                                "keep": 1.0,
-                                "discard": 0.0,
-                                "hybrid": self.config.hybrid_experience_training.train_sample_keepratio
-                            }
-
-                            train_sample_keepratio = expmode_to_ratio.get(train_sample_expmode)
-
-                            keep_count = int(len(gen_batch) * train_sample_keepratio)
-                            task_train_exp_modes = ['keep'] * keep_count + ['discard'] * (len(gen_batch) - keep_count)
-                            random.shuffle(task_train_exp_modes)
-
                             tasks = [Task(
                                         task_id=gen_batch.non_tensor_batch["extras"][i]["task_id"],
-                                        query=gen_batch.non_tensor_batch["extras"][i]['new_query'],
                                         env_type=self.config.env_service.env_type,
                                         open_query=gen_batch.non_tensor_batch["extras"][i]['open_query'],
                                         evaluator=gen_batch.non_tensor_batch['extras'][i]['evaluator'],
-                                        ground_truth=gen_batch.non_tensor_batch['extras'][i]['ground_truth'],
-                                        metadata={"task_train_exp_mode": mode}
-                                    ) for i, mode in enumerate(task_train_exp_modes)
+                                        ground_truth=gen_batch.non_tensor_batch['extras'][i]['ground_truth']
+                                    ) for i in range(len(gen_batch))
                             ]
-                            assert len(task_train_exp_modes)==len(gen_batch), "{len(task_train_exp_modes)=}, {len(gen_batch)=}"
+                            task_exp_configs = self.exp_manager.get_complete_exp_configs(tasks, mode="sample")
+                            assert len(task_exp_configs)==len(tasks), "{len(task_exp_configs)=}, {len(gen_batch)=}"
 
                             # TODO enable tracing by jinli 0619
                             print("=" * 10 + "start fit rollout" + "=" * 10)
-                            trajectories = self.env_manager.rollout(tasks, mode="sample", epoch=f"train.{epoch}.{i}")  # ⭐ Generate trajectories using the environment manager
+                            trajectories = self.env_manager.rollout(tasks, task_exp_configs, mode="sample", epoch=f"train.{epoch}.{i}")  # ⭐ Generate trajectories using the environment manager
                             assert len(trajectories)>0, "{len(trajectories)=}?"
                             print("=" * 10 + "end fit rollout" + "=" * 10)
 
@@ -1170,22 +1110,12 @@ class BeyondAgentRayPPOTrainer(RayPPOTrainer):
 
                     batch.batch["response_mask"] = compute_response_mask(batch)  # ⭐ Compute and add response mask to the batch
 
-                    # summary for experience of experience_maker, updating candidate context
                     ##################
-                    # ANNI modify 0812: update experience pool every k steps
-                    summary_task = None
-                    if self.config.experience_maker.enable_summarizer and self.config.experience_maker.updated_freq:
-                        if self.global_steps % self.config.experience_maker.updated_freq == 0:
-                            summary_task = self.thread_pool.submit(self.em_client.call_summarizer,
-                                                               trajectories=trajectories,
-                                                               workspace_id=self.config.experience_maker.workspace_id)  # ⭐ Submit a summary task asynchronously
-                            print("async submit summary_task~")
-                    # summary_task = None
-                    # if self.config.experience_maker.enable_summarizer:
-                    #     summary_task = self.thread_pool.submit(self.em_client.call_summarizer,
-                    #                                            trajectories=trajectories,
-                    #                                            workspace_id=self.config.experience_maker.workspace_id)
-                    #     print("async submit summary_task~")
+                    # [anni1015] TODO: 保留异步功能，拆分成两个函数
+                    # summary for experience of experience_maker, updating candidate context
+                    experience_metrics = self.exp_manager.schedule_exp_update(self.global_steps, trajectories)
+                    metrics.update(experience_metrics)
+                    ##################
 
                     # balance the number of valid tokens on each dp rank.
                     # Note that this breaks the order of data inside the batch.
@@ -1338,16 +1268,6 @@ class BeyondAgentRayPPOTrainer(RayPPOTrainer):
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
                         metrics.update(actor_output_metrics)
 
-                    if summary_task is not None:
-                        experience_list, time_cost = summary_task.result()
-                        metrics.update({
-                            "experience_maker/summary": time_cost,
-                        })
-                        print("wait for summary_task complete~")
-                        if experience_list:
-                            for i, experience in enumerate(experience_list):
-                                print(f"index={i} experience={experience}")
-
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
                     if rollout_data_dir:
@@ -1355,12 +1275,10 @@ class BeyondAgentRayPPOTrainer(RayPPOTrainer):
                             print(batch.batch.keys())
                             inputs = self.tokenizer.batch_decode(batch.batch["prompts"], skip_special_tokens=True)
                             outputs = self.tokenizer.batch_decode(batch.batch["responses"], skip_special_tokens=True)
-                            experiences_dict = batch.non_tensor_batch["extras"] # ANNI add
                             scores = batch.batch["token_level_scores"].sum(-1).cpu().tolist()
                             self._dump_generations(
                                 inputs=inputs,
                                 outputs=outputs,
-                                experiences=experiences_dict,   # ANNI add
                                 scores=scores,
                                 reward_extra_infos_dict=reward_extra_infos_dict,
                                 dump_path=rollout_data_dir,
