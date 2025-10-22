@@ -227,7 +227,7 @@ class ExperienceWorker(object):
 
         logger.info(f"History experience: {history_experience}")
         formatted_experience = self.experience_template.format(history_experience)
-        new_content = formatted_experience + "\n\n" + trajectory.steps[-1]["content"]
+        new_content = formatted_experience + trajectory.steps[-1]["content"]
         trajectory.steps[-1]["content"] = new_content
         traj_exp_config.experience_list += [formatted_experience]
 

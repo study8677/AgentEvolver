@@ -337,7 +337,7 @@ class ParallelEnvManager(object):
                             # as most errors are internet error or quota, we wait before resubmit it
                             time.sleep(30)
                             # resubmit and reset tmux and stop
-                            thread_index=params[4]
+                            thread_index=params[5]
                             for k in tmux: tmux[k][thread_index] = 0
                             stop[thread_index]=False
                             new_future = executor.submit(self.rollout_env_worker, *params) # type: ignore
@@ -352,7 +352,7 @@ class ParallelEnvManager(object):
                         # handle the uncaught exception
                         logger.error(f"Task {params[1]}-{params[2]} raised an exception: {e}. Retrying... \n Task: {params[0]}")
                         # resubmit, and reset tmux and stop
-                        thread_index=params[4]
+                        thread_index=params[5]
                         for k in tmux: tmux[k][thread_index] = 0
                         stop[thread_index]=False
                         new_future = executor.submit(self.rollout_env_worker, *params) # type: ignore
