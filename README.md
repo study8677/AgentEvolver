@@ -18,7 +18,7 @@
   <strong>AgentEvolver: An Efficient Self-Evolving Agent System</strong><br>
 </p> -->
 
-**AgentEvolver** is an end-to-end, self-evolving training framework that empowers agents to autonomously
+**AgentEvolver** is an end-to-end, self-evolving training framework that unifies self-questioning, self-navigation, and self-attribution into a cohesive system. It empowers agents to autonomously
 improve their capabilities, aiming for efficient, cost-effective, and continuous capability evolution.
 
 - **Automatic Task Generation** – Curiosity-driven *self-questioning* to probe the environment and autonomously create diverse tasks, eliminating costly manual dataset construction.  
