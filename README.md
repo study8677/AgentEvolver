@@ -1,7 +1,7 @@
 <p align="center">
- <img src="docs/img/logo.jpg" alt="AgentEvolver Logo" width="90%">
+ <img src="docs/img/logo.jpg" alt="AgentEvolver Logo" width="70%">
 </p>
-<h2 align="center">AgentEvolver: An Efficient Self-Evolving Agent System</h2>
+<h2 align="center">AgentEvolver: Towards Efficient Self-Evolving Agent System</h2>
 
 <!-- --- -->
 
@@ -18,8 +18,15 @@
   <strong>AgentEvolver: An Efficient Self-Evolving Agent System</strong><br>
 </p> -->
 
-**AgentEvolver** is an end-to-end, self-evolving training framework that unifies self-questioning, self-navigation, and self-attribution into a cohesive system. It empowers agents to autonomously
+**AgentEvolver** is an end-to-end, self-evolving training framework that unifies self-questioning, self-navigating, and self-attributing into a cohesive system. It empowers agents to autonomously
 improve their capabilities, aiming for efficient, cost-effective, and continuous capability evolution.
+
+
+
+<p align="center">
+ <img src="docs/img/flowchart.png" alt="AgentEvolver Logo" width="80%">
+</p>
+
 
 - **Automatic Task Generation** – Curiosity-driven *self-questioning* to probe the environment and autonomously create diverse tasks, eliminating costly manual dataset construction.  
 - **Experience-guided Exploration** – *Self-navigating* strategies that summarize and reuse cross-task experience to guide higher-quality rollouts and improve exploration efficiency.  
@@ -28,6 +35,12 @@ improve their capabilities, aiming for efficient, cost-effective, and continuous
 - **Environment Compatibility** – Standardized interfaces for seamless integration with a wide range of external environments and tool APIs.  
 - **Flexible Context Manager** – Built-in utilities for managing multi-turn contexts and complex interaction logic, supporting diverse deployment scenarios.  
 - **Modular & Extensible Architecture** – Decoupled components allow easy customization, secondary development, and future algorithm upgrades.  
+
+
+
+
+
+
 
 
 ## 📰 News
