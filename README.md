@@ -22,30 +22,40 @@
 improve their capabilities, aiming for efficient, cost-effective, and continuous capability evolution.
 
 
+## 📰 News
+
+- **[2025-10]** 🎉🎉 AgentEvolver Technical Report is released now!
+- **[2025-10]** 🎉🎉 AgentEvolver v1 is released now!
+
+
+## 🧠 Why AgentEvolver
 
 <p align="center">
  <img src="docs/img/flowchart.png" alt="AgentEvolver Logo" width="80%">
 </p>
 
+🧠 **Self-Evolving Mechanisms** from Environment to Policy:
 
-- **Automatic Task Generation** – Curiosity-driven *self-questioning* to probe the environment and autonomously create diverse tasks, eliminating costly manual dataset construction.  
-- **Experience-guided Exploration** – *Self-navigating* strategies that summarize and reuse cross-task experience to guide higher-quality rollouts and improve exploration efficiency.  
-- **Attribution-based Credit Assignment** – *Self-attributing* along long trajectories to uncover the causal contribution of intermediate steps, enabling fine-grained and efficient policy optimization.  
+- **Automatic Task Generation (Self-Questioning)** – Explore the environment and autonomously create diverse tasks, eliminating costly manual dataset construction.  
+- **Experience-guided Exploration (Self-Navigating)** – Summarize and reuse cross-task experience, guiding higher-quality rollouts and improving exploration efficiency.  
+- **Attribution-based Credit Assignment (Self-Attributing)** – Process long trajectories to uncover the causal contribution of intermediate steps, enabling fine-grained and efficient policy optimization.  
+
+
+
+
+## 🔧 Architecture Design
+AgentEvolver adopts a service-oriented dataflow architecture, seamlessly integrating environment sandboxes, LLMs, and experience management into modular services.
+
+<p align="center">
+ <img src="docs/img/system.png" alt="system framework" width="80%">
+</p>
+
 
 - **Environment Compatibility** – Standardized interfaces for seamless integration with a wide range of external environments and tool APIs.  
 - **Flexible Context Manager** – Built-in utilities for managing multi-turn contexts and complex interaction logic, supporting diverse deployment scenarios.  
 - **Modular & Extensible Architecture** – Decoupled components allow easy customization, secondary development, and future algorithm upgrades.  
 
 
-
-
-
-
-
-
-## 📰 News
-
-- **[2025-10]** 🎉🎉 AgentEvolver v1 is released now!
 
 
 ## 🚀 Quick Start
