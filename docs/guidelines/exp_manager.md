@@ -57,7 +57,7 @@ exp_modes = ['keep'] * keep_count + ['discard'] * (len(tasks) - keep_count)
         - `"woexp"` → no rollout uses experience (pure exploration) 
         - `"all"` → all rollouts use experience (fully guided) 
         - `"mixed"` → *partially guided*, rollout experience usage ratio determined by `rollout_ratio`
-    - The parameter `rollout_ratio` only takes effect when `val_rollout_mode/val_rollout_mode="mixed"`. For example, `rollout_expratio=0.3` means *30%* of rollouts will include experience, while the remaining *70%* proceed without it.
+    - The parameter `rollout_ratio` only takes effect when `val_rollout_mode/train_rollout_mode="mixed"`. For example, `rollout_expratio=0.3` means *30%* of rollouts will include experience, while the remaining *70%* proceed without it.
 
 ```python
 # Class: ExperienceManager
