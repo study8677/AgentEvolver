@@ -122,7 +122,7 @@ conda activate agentevolver
 python launcher.py --conf examples/basic.yaml --with-appworld
 
 # option 2: full example with ReMe (questioning + navigating + attributing)
-python launcher.py --conf examples/overall.yaml --with-appworld --with-exp-maker
+python launcher.py --conf examples/overall.yaml --with-appworld --with-reme
 ```
 
 ## 🧩 Advanced Usage
