@@ -147,6 +147,10 @@ For detailed usage and customization, please refer to the following guidelines:
 
 For API documentation and more details, visit our [documentation site](docs/index.md).
 
+## 🔮 Upcoming
+- **Evolution in multi-agent scenarios** – Investigate autonomous co-evolution strategies for agents operating within shared, interactive environments.
+- **Cross-stage collaborative self-evolution** – Explore methods that couple questioning, navigating, and attributing into coordinated loops for mutual enhancement.
+
 <!-- ## 🌟 Contact Us -->
 
 ## 🙏 Acknowledgements
